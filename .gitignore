@@ -1,0 +1,15 @@
+# Build output (produced by build_uci.bat) -- not checked in.
+# Prebuilt binaries are published under GitHub Releases instead.
+/compilation/
+/distribution/
+
+# GNAT intermediate files, in case a build is ever run outside compilation/
+*.ali
+*.o
+*.obj
+
+# Editor/OS cruft
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store
