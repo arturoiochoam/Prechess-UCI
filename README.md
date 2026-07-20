@@ -14,10 +14,6 @@ preserving the legacy move-ordering and evaluation heuristic in
 >   end, FIDE rules, time management, legal-move corrections, and the
 >   additive search improvements described below).
 
-`IMPLEMENTATION.md` is the companion document with the full design rationale
-and verification for every change; this file states each change once and does
-not repeat those details.
-
 ---
 
 ## Version 0.7.8 (legacy baseline)
@@ -243,8 +239,7 @@ and gating that every required file is staged before archiving. Output:
 - `compilation/prechess-0.7.9-win64.exe` — build artefact
 - `distribution/prechess-0.7.9-win64.exe` — final executable
 - `distribution/prechess-0.7.9-win64.zip` — flat ZIP: the Win64 executable,
-  `README_UCI.md`, `IMPLEMENTATION.md`, `license.txt`, and a `source/` folder
-  with the complete active engine source
+  `license.txt`, and a `source/` folder with the complete active engine source
 - `distribution/prechess-0.7.9-build.log` — compiler log
 - `distribution/prechess-0.7.9-checksums.txt` — SHA-256 of the above
 
