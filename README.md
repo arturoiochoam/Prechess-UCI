@@ -24,10 +24,6 @@ Copyright (c) 2026 José Lauro Strapasson & Arthur Matheus.
 
 ## Changelog
 
-Newest first. Each entry lists only the substantive, verified change and
-result for that release — see the gate files under `implementation/gates/`
-for full process detail if needed.
-
 ### v0.7.9.9
 
 - Stage-1 code review: 15 findings (3 high, 9 medium, 2 low, 1 info), no
