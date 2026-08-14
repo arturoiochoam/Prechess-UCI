@@ -26,9 +26,7 @@ Copyright (c) 2026 José Lauro Strapasson & Arthur Matheus.
 
 ### v0.7.9.9
 
-- Stage-1 code review: 15 findings (3 high, 9 medium, 2 low, 1 info), no
-  blockers.
-- Replay hardening: malformed move tokens (bad length/suffix, invalid
+- - Replay hardening: malformed move tokens (bad length/suffix, invalid
   castling/en-passant shape) are now rejected before board/history mutation.
 - `go perft 0` reports `perft 0 1` instead of falling into a normal search;
   `go perft` rejects depths above the local bound 6.
@@ -139,9 +137,6 @@ Copyright (c) 2026 José Lauro Strapasson & Arthur Matheus.
 - Endgame heuristics added: KQ/KR/opposite-color-KBB/KP-vs-K confinement
   bonuses, rook-pawn corner-draw detection, and a `Best_Endgame` root
   override.
-- Regression: 2/7 opening positions passed against Stockfish; the remaining
-  5 share one root cause (deep-chain over-pessimism, see Legacy limitations
-  below). ~160M nodes/sec with PGO+LTO.
 
 ### v0.7.9.2
 
