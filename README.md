@@ -26,7 +26,7 @@ Copyright (c) 2026 José Lauro Strapasson & Arthur Matheus.
 
 ### v0.7.9.9
 
-- - Replay hardening: malformed move tokens (bad length/suffix, invalid
+- Replay hardening: malformed move tokens (bad length/suffix, invalid
   castling/en-passant shape) are now rejected before board/history mutation.
 - `go perft 0` reports `perft 0 1` instead of falling into a normal search;
   `go perft` rejects depths above the local bound 6.
