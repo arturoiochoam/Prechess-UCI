@@ -17,6 +17,8 @@ section for how the legacy core and the newer layers fit together.
 >   end, FIDE rules, time management, legal-move corrections, and the
 >   additive search improvements described below).
 
+## Language: Ada 2022
+
 ## License
 
 Released under the MIT License — see `license.txt` for the full text.
