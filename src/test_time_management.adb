@@ -1,3 +1,20 @@
+-------------------------------------------------------------------------------
+--  PRECHESS UCI - TIME MANAGEMENT & BUDGET ALLOCATION TEST SUITE
+--
+--  Harness:       Test_Time_Management
+--  Language:      Ada 2022 (ISO/IEC 8652:2023)
+--  Author:        Arthur Matheus (UCI Engine Integration & Test Harness)
+--  Date:          2026
+--
+--  SCOPE & TEST MATRICES:
+--  1. Modal Budget Calculations:
+--     - Fixed depth, move time, tournament (movestogo), and sudden-death blitz.
+--  2. Safety Margin Verification:
+--     - `Overhead_Ms` deduction and minimum 1 ms allocation clamping.
+--  3. PV Probe Throttling:
+--     - Unrestricted under infinite/movetime; restricted to first 25% under game clocks.
+-------------------------------------------------------------------------------
+
 with Ada.Command_Line;
 with Ada.Real_Time; use Ada.Real_Time;
 with Ada.Text_IO; use Ada.Text_IO;

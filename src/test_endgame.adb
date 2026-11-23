@@ -1,17 +1,27 @@
+-------------------------------------------------------------------------------
+--  PRECHESS UCI - ENDGAME MATING REGIMES & THEORETICAL DRAW TEST HARNESS
+--
+--  Harness:       Test_Endgame
+--  Language:      Ada 2022 (ISO/IEC 8652:2023)
+--  Author:        Arthur Matheus (Endgame Evaluation & Test Harness)
+--  Date:          2026
+--
+--  SCOPE & TEST MATRICES:
+--  1. Basic Mating Regimes:
+--     - KQ vs K, KR vs K: Center-confinement & rimward drive heuristics.
+--     - Opposite-color KBB vs K: Corner mating drive.
+--     - KP vs K: King opposition & pawn promotion escort.
+--  2. Theoretical Draws:
+--     - Wrong Rook Pawn (a/h-pawn with defending king occupying corner).
+--     - Stalemate avoidance verification.
+-------------------------------------------------------------------------------
+
 with Ada.Command_Line;
 with Ada.Text_IO; use Ada.Text_IO;
 with Search_Integration;
 with Move_Validation;
 with Pvalidade;
 
---  Phase P9 endgame gate. Loads each test FEN, reports the score the
---  UCI loop would display (Material_Score_Cp, which includes the
---  endgame overlay), whether Endgame_Is_Draw recognises the position,
---  and the move Best_Endgame picks (the root override the integrator
---  wires into Compute_Best_Move alongside the other Best_* helpers).
---  Each line also confirms the override's move strictly IMPROVES the
---  Side_Endgame_Bonus_Cp heuristic -- which is the N1 contract: a
---  better move, in a general direction, for ANY matching position.
 procedure Test_Endgame is
 
    White_To_Move : Boolean;

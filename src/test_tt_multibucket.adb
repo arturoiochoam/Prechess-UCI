@@ -1,12 +1,27 @@
+-------------------------------------------------------------------------------
+--  PRECHESS UCI - MULTI-BUCKET TRANSPOSITION TABLE REPLACEMENT TEST HARNESS
+--
+--  Harness:       Test_TT_Multibucket
+--  Language:      Ada 2022 (ISO/IEC 8652:2023)
+--  Author:        Arthur Matheus (UCI Engine Integration & Test Harness)
+--  Date:          2026
+--
+--  SCOPE & TEST MATRICES:
+--  1. 4-Way Associative Cluster Coexistence:
+--     - Storing 4 distinct keys mapping to the same cluster index.
+--  2. In-Place Exact Key Refresh:
+--     - Overwriting deeper search values for existing keys without eviction.
+--  3. Depth-Preferred & Generation-Aging Eviction:
+--     - 5th key correctly evicts the shallowest / oldest slot in the cluster.
+--  4. Clear & Probe Invalidation:
+--     - Complete probe miss verification following `Clear_TT`.
+-------------------------------------------------------------------------------
+
 with Ada.Command_Line;
 with Ada.Text_IO; use Ada.Text_IO;
 with TT_Table;
 with TT_Types; use TT_Types;
 
---  Gate for the multi-bucket transposition table (v0.7.9.2).
---  Verifies: same-cluster coexistence, exact-key refresh, shallow victim
---  replacement, and Probe miss after Clear_TT. Does not touch the legacy
---  search cascade.
 procedure Test_TT_Multibucket is
    Failed : Natural := 0;
 
@@ -75,19 +90,10 @@ begin
    --  property of Allocate: with Size_MB=1, Clusters = Bytes/Cluster_Bytes
    --  which is large. We can compute the same formula locally for the test.
 
-   declare
-      Entry_Bytes : constant Long_Long_Integer :=
-        Long_Long_Integer (TT_Entry'Size + 7) / 8;
-      Cluster_Bytes : constant Long_Long_Integer :=
-        Entry_Bytes * Long_Long_Integer (TT_Table.Bucket_Count);
-      Clusters : constant Hash_Key :=
-        Hash_Key ((1024 * 1024) / Cluster_Bytes);
-   begin
-      N := Clusters;
-      if N < 1 then
-         N := 1;
-      end if;
-   end;
+   N := TT_Table.Cluster_Count;
+   if N < 1 then
+      N := 1;
+   end if;
 
    K0 := 0;
    K1 := N;
@@ -136,6 +142,50 @@ begin
    TT_Table.Store_TT (0, 2, 0, Exact, Mk_Move (2, 3));
    Hit := TT_Table.Probe_TT (0, Ent);
    Expect (Hit and then Ent.Best.From_Sq = 2, "real Key=0 store is probeable");
+
+   -- -------------------------------------------------------------------------
+   --  N2: Generation-Aged Victim Selection Test
+   -- -------------------------------------------------------------------------
+   TT_Table.Clear_TT;
+   --  Fill cluster 0 with 4 distinct keys (K0, K1, K2, K3):
+   TT_Table.Store_TT (K0, 12, 100, Exact, Mk_Move (1, 2));
+   TT_Table.Store_TT (K1, 8, 200, Exact, Mk_Move (3, 4));
+   TT_Table.Store_TT (K2, 10, 300, Exact, Mk_Move (5, 6));
+   TT_Table.Store_TT (K3, 7, 400, Exact, Mk_Move (7, 8));
+
+   --  Same-generation check: storing K4 with depth 6 in the same generation
+   --  must evict the shallowest entry (K3, depth 7), NOT depth 12 (K0).
+   TT_Table.Store_TT (K4, 6, 500, Exact, Mk_Move (9, 10));
+   Hit := TT_Table.Probe_TT (K0, Ent);
+   Expect (Hit and then Ent.Depth = 12, "same gen: depth-12 (K0) preserved against depth-6 (K4)");
+   Hit := TT_Table.Probe_TT (K3, Ent);
+   Expect (not Hit, "same gen: shallowest depth-7 (K3) evicted by depth-6");
+
+   --  Now advance 2 generations:
+   TT_Table.New_Generation;
+   TT_Table.New_Generation;
+   --  Current entries in cluster 0:
+   --  K0: depth 12, generation G-2 -> effective depth = 12 - 4*2 = 4
+   --  Refresh K1, K2, K4 to current generation with fresh depths 8, 10, 7:
+   TT_Table.Store_TT (K1, 8, 200, Exact, Mk_Move (3, 4));
+   TT_Table.Store_TT (K2, 10, 300, Exact, Mk_Move (5, 6));
+   TT_Table.Store_TT (K4, 7, 500, Exact, Mk_Move (9, 10));
+
+   --  Now store K3 with fresh depth 6 in current generation:
+   --  Effective depths: K0 = 4, K1 = 8, K2 = 10, K4 = 7.
+   --  K0 has the lowest effective depth (4 < 6), so K0 must be displaced!
+   TT_Table.Store_TT (K3, 6, 600, Exact, Mk_Move (7, 8));
+
+   Hit := TT_Table.Probe_TT (K0, Ent);
+   Expect (not Hit, "N2: stale depth-12 entry displaced by fresh depth-6 two generations later");
+   Hit := TT_Table.Probe_TT (K3, Ent);
+   Expect (Hit and then Ent.Depth = 6, "N2: fresh depth-6 entry occupies cluster slot");
+   Hit := TT_Table.Probe_TT (K1, Ent);
+   Expect (Hit and then Ent.Depth = 8, "fresh depth-8 entry preserved");
+   Hit := TT_Table.Probe_TT (K2, Ent);
+   Expect (Hit and then Ent.Depth = 10, "fresh depth-10 entry preserved");
+   Hit := TT_Table.Probe_TT (K4, Ent);
+   Expect (Hit and then Ent.Depth = 7, "fresh depth-7 entry preserved");
 
    if Failed = 0 then
       Put_Line ("TEST_TT_MULTIBUCKET: PASS");

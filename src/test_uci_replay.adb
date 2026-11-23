@@ -1,3 +1,20 @@
+-------------------------------------------------------------------------------
+--  PRECHESS UCI - UCI MOVE REPLAY & GAME SYNCHRONIZATION TEST SUITE
+--
+--  Harness:       Test_UCI_Replay
+--  Language:      Ada 2022 (ISO/IEC 8652:2023)
+--  Author:        Arthur Matheus (UCI Engine Integration & Test Harness)
+--  Date:          2026
+--
+--  SCOPE & TEST MATRICES:
+--  1. Position Synchronization:
+--     - Handling `position startpos moves ...` and `position fen ... moves ...`.
+--  2. Turn-Explicit Move Rejection:
+--     - Rejection of illegal / wrong-side tokens preventing board corruption.
+--  3. Replay State Maintenance:
+--     - Accurate tracking of castling rights, en-passant square, and 50-move counter.
+-------------------------------------------------------------------------------
+
 with Ada.Command_Line;
 with Ada.Text_IO; use Ada.Text_IO;
 with Search_Integration;

@@ -1,3 +1,21 @@
+-------------------------------------------------------------------------------
+--  PRECHESS UCI - TAPERED POSITIONAL EVALUATION (PESTO PST) TEST SUITE
+--
+--  Harness:       Test_PST_Tapered
+--  Language:      Ada 2022 (ISO/IEC 8652:2023)
+--  Author:        Arthur Matheus (Positional Evaluation Layer)
+--  Date:          2026
+--
+--  SCOPE & TEST MATRICES:
+--  1. Game Phase Calculation:
+--     - Verifies non-pawn material weighting maps opening to 256 and lone kings to 0.
+--  2. Linear PeSTO Interpolation:
+--     - Confirms exact `(MG * Phase + EG * (256 - Phase)) / 256` interpolation.
+--  3. Piece-Square Table Symmetry & Delta Bounds:
+--     - Validates positional scores for center knights, fianchetto bishops,
+--       and advanced passed pawns.
+-------------------------------------------------------------------------------
+
 with Ada.Text_IO; use Ada.Text_IO;
 with Pvalidade; use Pvalidade;
 with pprechess2;

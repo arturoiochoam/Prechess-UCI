@@ -1,14 +1,26 @@
+-------------------------------------------------------------------------------
+--  PRECHESS UCI - FIDE DRAW RULES VERIFICATION SUITE
+--
+--  Harness:       Test_Draw_Rules
+--  Language:      Ada 2022 (ISO/IEC 8652:2023)
+--  Author:        Arthur Matheus (UCI Engine Integration & Test Harness)
+--  Date:          2026
+--
+--  SCOPE & TEST MATRICES:
+--  1. Threefold Repetition:
+--     - Exact board position identity across identical Zobrist keys.
+--     - Negative cases: Differentiating positions by castling rights,
+--       en-passant availability, and color-to-move turn parity.
+--  2. 50-Move Rule (Article 9.3):
+--     - Counter increment on quiet moves; reset on pawn moves and captures.
+--  3. Insufficient Material Combinations (Article 9.6):
+--     - K vs K, K+N vs K, K+B vs K, same-color K+B+B vs K.
+-------------------------------------------------------------------------------
+
 with Ada.Text_IO; use Ada.Text_IO;
 with Search_Integration;
 with Pvalidade;
 
---  Rule-focused test suite for the FIDE draw rules and their edge
---  cases: threefold repetition (including what must NOT count as the
---  "same position": different castling rights, different en-passant
---  availability, different king placement), the 50-move rule's reset
---  conditions, and exhaustive insufficient-material combinations.
---  Throwaway harness in the spirit of test_moves.adb: drives
---  Search_Integration directly and prints PASS/FAIL per case.
 procedure Test_Draw_Rules is
 
    White_To_Move : Boolean;

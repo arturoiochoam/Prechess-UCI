@@ -1,15 +1,27 @@
+-------------------------------------------------------------------------------
+--  PRECHESS UCI - SPECIAL FIDE MOVES & LEGALITY VERIFICATION SUITE
+--
+--  Harness:       Test_Special_Moves
+--  Language:      Ada 2022 (ISO/IEC 8652:2023)
+--  Author:        Arthur Matheus (UCI Engine Integration & Test Harness)
+--  Date:          2026
+--
+--  SCOPE & TEST MATRICES:
+--  1. FIDE Castling Legality (Article 3.8.2):
+--     - Kingside & Queenside execution, transit check obstruction,
+--       rook capture right revocation, and lying-FEN resilience.
+--  2. En-Passant Capture Dynamics (Article 3.7.4):
+--     - Immediate execution requirement, square clearance, absolute pin
+--       exposure prevention.
+--  3. Pawn Promotion & Underpromotion (Article 3.7.5):
+--     - Q, R, B, N promotions on 8th rank, capture-promotions.
+-------------------------------------------------------------------------------
+
 with Ada.Text_IO; use Ada.Text_IO;
 with Search_Integration;
 with Move_Validation;
 with Pvalidade;
 
---  Task-6 gate suite: legal move generation & special moves.
---  Castling (full FIDE conditions, positive and negative), en passant
---  (availability, pin exposure, lying-FEN guards), promotions and
---  underpromotions (input round-trips, capture-promotion, rights
---  revocation by promotion-capture on a rook home square), and the
---  pawn double-step blocking / legacy en-passant-avoidance rules in
---  the search's own move generator (Pvalidade.Validade).
 procedure Test_Special_Moves is
 
    White_To_Move : Boolean;

@@ -1,5 +1,6 @@
-with Pvalidade;
-with Search_Integration; use Pvalidade;
+with Ada.Text_IO;
+with Move_Validation;
+with Pvalidade; use Pvalidade;
 with Time_Management;
 
 package body pprechess2 is
@@ -18,8 +19,6 @@ package body pprechess2 is
    --  These ONLY break ties among quiet moves the decision cascade already
    --  considers equally safe -- they do not change what is "safe" anywhere, only
    --  which equally-safe move is kept when no tactical tier decides.
-   subtype Square_Index is Integer range 1 .. 64;
-   subtype Phase_256 is Integer range 0 .. 256;
    type PST_Array is array (Square_Index) of Integer;
 
    --  Opening-only pawn tie-break from the 0.7.9.6 PST. The tapered
@@ -157,7 +156,6 @@ package body pprechess2 is
        11,   23,   38,   17,   17,   14,   17,  -12,
       -17,    4,   15,  -11,  -18,  -18,  -35,  -74);
 
-   type Piece_Code is (Pawn, Bishop, Knight, Rook, Queen, King);
    function To_Piece_Code (Piece : Integer) return Piece_Code is
       (case Piece is
           when 1    => Pawn,
@@ -170,7 +168,6 @@ package body pprechess2 is
    pragma Inline (To_Piece_Code);
 
    Total_Phase : constant := 24;
-   Root_Game_Phase : Phase_256 := 0;
 
    function Phase_Weight (Piece : Integer) return Integer is
       (case abs Piece is
@@ -241,25 +238,204 @@ package body pprechess2 is
    --  Piece-aware quiet-move tie-break. Piece codes are the search's own:
    --  Pawn=1, Bishop=3, Knight=4, Rook=7, Queen=20, King=999.
    function Positional_Score (Piece : Piece_Code; Sq : Square_Index) return Integer is
+      Phase : constant Phase_256 := Compute_Game_Phase;
    begin
-      if Piece = Pawn and then Root_Game_Phase = 0 then
+      --  0.9.9.17.20 deep-bug fix: this runs on NON-root boards too (Stage-7
+      --  tree nodes, PV scratch lines). The root snapshot went stale after
+      --  captures deeper in the line, mis-tapering MG/EG PSTs downstream.
+      --  Compute the phase from the board actually being evaluated.
+      if Piece = Pawn and then Phase = 0 then
          return PST_Pawn_Opening (Sq);
       end if;
-      return Score_With_Phase (Piece, Sq, Root_Game_Phase);
+      return Score_With_Phase (Piece, Sq, Phase);
    end Positional_Score;
    pragma Inline (Positional_Score);
 
+   --  Returns centipawn material value for a piece type.
+   --  P=100, N=320, B=330, R=500, Q=900. King returns 0.
+   function Material_Value (Piece : Piece_Code) return Integer is
+      (case Piece is
+          when Pawn   => 100,
+          when Knight => 320,
+          when Bishop => 330,
+          when Rook   => 500,
+          when Queen  => 900,
+          when King   => 0);
+   pragma Inline (Material_Value);
 
-Procedure prechess2 is
+   --  Whole-board tapered PST sum. Iterates Tabuleiro once and adds each
+   --  occupied square's Positional_Score. Tabuleiro is the search's own
+   --  positive=White, negative=Black frame; Positional_Score already
+   --  white-relative-signs its output for the piece it was given, so we
+   --  feed it |Piece| and apply the sign ourselves. Result when
+   --  White_Relative=True: own (White) pieces +, enemy (Black) pieces -.
+   --  When White_Relative=False: we negate the whole sum so the caller
+   --  can think purely in "my minus his" terms regardless of which side
+   --  is to move. The returned frame is byte-for-byte the same one
+   --  Material uses, so the caller can simply add it to the material sum.
+   function Positional_Sum (White_Relative : Boolean) return Integer is
+      Sum  : Integer := 0;
+      Code : Integer;
+      PC   : Piece_Code;
+   begin
+      for Sq in Square_Index loop
+         Code := Tabuleiro (Sq);
+         if Code /= 0 then
+            if Code > 0 then
+               PC   := To_Piece_Code (Code);
+               Sum  := Sum + Positional_Score (PC, Sq);
+            else
+               PC   := To_Piece_Code (-Code);
+               --  Black pieces are scored through the rank-mirrored square so
+               --  that a mirrored position yields the exact negated score.
+               Sum  := Sum - Positional_Score
+                 (PC,
+                  Square_Index (Move_Validation.Mirror_Square (Sq)));
+            end if;
+         end if;
+      end loop;
+      if not White_Relative then
+         Sum := -Sum;
+      end if;
+      return Sum;
+   end Positional_Sum;
 
- i,J: Integer:=1;  --Usados como memoria da 1a jogada; ver Segundo_Lance/Analize1/Analize2.
 
- --  Caches for the final decision cascade only (see note above the
- --  precompute loop, near "Aqui da xeque mate nele!"). Never read or
- --  written anywhere during the ply-1/2/3 trial-move search itself.
+ --  ----------------------------------------------------------------------
+ --  G8 / Phase 7 (Objective B) -- decision-cascade material ratios.
+ --
+ --  The legacy cascade judged "is this trade good?" by comparing the piece
+ --  CODES themselves (P=1, B=3, N=4, R=7, Q=20, K=999).  Those codes are
+ --  identity constants used throughout move generation and cannot be
+ --  changed, so the cascade gets its own value table and every material
+ --  ORDERING test is routed through Casc_Value instead.
+ --
+ --  Step 0 (routing) initialises the table to the legacy ratios scaled by
+ --  a uniform x100.  A uniform rescale leaves every ordering unchanged, so
+ --  this step is provably behaviour-identical to the legacy cascade while
+ --  also repairing a live inconsistency: before G8 the four Analize2 call
+ --  sites already passed centipawn thresholds (-330/-320/-500/-900) into
+ --  Protegida, whose body still compared them against RAW piece codes, so
+ --  the guard fired for every attacker except the king and Protegida
+ --  returned False almost always.
+ --
+ --  The three G8 ratios are then applied one at a time:
+ --     Queen    20 -> 900   (ordering preserved, ratio corrected)
+ --     Rook      7 -> 500   (ordering preserved, ratio corrected)
+ --     N/B    4/3  -> 320/330  (the only step that changes an ordering)
+ --  The King keeps its legacy "above everything" position; that slot is
+ --  unreachable in legal play (a king can never capture onto a square the
+ --  opponent defends), so it is left alone rather than demoted here.
+ --  ----------------------------------------------------------------------
+ function Casc_Value (Piece_Code : Integer) return Integer is
+   (case Piece_Code is
+       when 1   => Casc_Pawn,
+       when 3   => Casc_Bishop,
+       when 4   => Casc_Knight,
+       when 7   => Casc_Rook,
+       when 20  => Casc_Queen,
+       when 999 => Casc_King,
+       when others => 0);
+ pragma Inline (Casc_Value);
+
+ --  Move_Viable: after applying a trial move for side White, that side's
+ --  king must not be capturable. Zero-heap, O(64) worst case.
+ function Move_Viable (White : Boolean) return Boolean is
+    Rei : Integer := 0;
+ begin
+    for A in 1 .. 64 loop
+       if Tabuleiro (A) = (if White then 999 else -999) then
+          Rei := A;
+          exit;
+       end if;
+    end loop;
+    if Rei = 0 then
+       return False;   --  king already gone: not viable
+    end if;
+    for B in 1 .. 64 loop
+       declare
+          P : constant Integer := Tabuleiro (B);
+       begin
+          if (White and then P < 0) or else (not White and then P > 0) then
+             if Validade (B, Rei) then
+                return False;
+             end if;
+          end if;
+       end;
+    end loop;
+    return True;
+ end Move_Viable;
+
+ --  Defender_Is_Legal: verifies that playing the defender move (Def_Sq -> Target_Sq)
+ --  leaves that side's king safe (guards against pinned defenders).
+ function Defender_Is_Legal (Def_Sq, Target_Sq : Integer; White : Boolean) return Boolean is
+    Att   : constant Integer := Tabuleiro (Target_Sq);
+    Def   : constant Integer := Tabuleiro (Def_Sq);
+    Legal : Boolean;
+ begin
+    Tabuleiro (Def_Sq)    := 0;
+    Tabuleiro (Target_Sq) := Def;
+    Legal := Move_Viable (White);
+    Tabuleiro (Target_Sq) := Att;
+    Tabuleiro (Def_Sq)    := Def;
+    return Legal;
+ end Defender_Is_Legal;
+
+ function Protegida(B, Piece_Threshold : Integer) return Boolean is
+ begin
+  --  G8: |Piece_Threshold| is now a Casc_Value (see the table above), so
+  --  both sides of this ordering test are expressed in the same units.
+  --  The legacy form "Tabuleiro(B) > Piece_Threshold" compared raw codes
+  --  on both sides, i.e. |capturer| < |piece we just lost|; this is the
+  --  same test, merely re-based onto the cascade value table.
+  if Casc_Value (abs Tabuleiro (B)) < abs Piece_Threshold then
+     return False;
+  end if;
+  --  Early-exit on the first defender: Validade is a pure geometry oracle
+  --  (no board writes), so returning mid-scan is identical to the old
+  --  "set Result and finish the loop" form -- just far fewer calls in the
+  --  hot (k,l) trial loop that invokes this via Analize2.
+  for C in 1 .. 64 loop
+     if Validade(C,B)=True and Tabuleiro(C)>0 and Tabuleiro(C)/=999 then
+        if Defender_Is_Legal (C, B, White => True) then
+           return True;
+        end if;
+     end if;
+  end loop;
+  return False;
+ end Protegida;
+
+ --  Mirror of Protegida for the other side: does ANY of the person's
+ --  pieces legally defend (i.e. could immediately recapture on) square Sq?
+ --  Guarded by Defender_Is_Legal against pinned defenders.
+ function Person_Defends (Sq : Integer) return Boolean is
+ begin
+    for C in 1 .. 64 loop
+       if Tabuleiro(C) < 0 and then Validade(C,Sq) then
+          if Defender_Is_Legal (C, Sq, White => False) then
+             return True;
+          end if;
+       end if;
+    end loop;
+    return False;
+ end Person_Defends;
+
+ ----------------------------------------------------------------------------
+ --  CASCADE CACHES & SELECTION HELPERS (S2 / ZERO HEAP ALLOCATION)
+ ----------------------------------------------------------------------------
  Valid_Cache : array(1..64,1..64) of Boolean;
  Own_Piece   : array(1..64) of Boolean;
  Not_Own     : array(1..64) of Boolean;
+ --  0.9.9.17.20: pure board geometry, independent of Jogada_Vetada. Built
+ --  once per position; the UCI layer invalidates it whenever the board or
+ --  its color frame changes, so veto re-asks skip the 4096-Validade sweep.
+ Valid_Geometry      : array(1..64,1..64) of Boolean;
+ Valid_Geometry_Ready : Boolean := False;
+
+ procedure Invalidate_Cascade_Cache is
+ begin
+    Valid_Geometry_Ready := False;
+ end Invalidate_Cascade_Cache;
 
  type Root_Move is record
     A : Integer;
@@ -269,26 +445,24 @@ Procedure prechess2 is
  Root_Moves      : Root_Move_Array;
  Root_Move_Count : Natural := 0;
 
- --  The fallback tiers below (the "Aqui joga ... que nao perca nada"
- --  blocks) scan every (A,B) pair in ascending order and keep the pair
- --  whose Positional_Score (package-level, above) is >= the best so far
- --  -- i.e. among the moves the cascade already considers equally safe,
- --  they now keep the positionally best one. This was destination-file
- --  centrality only (Quiet_Move_Score), which treated a king's central
- --  step the same as a developing knight; it is now the piece-aware
- --  piece-square value. A full safety match is still required first; the
- --  score only decides which of several already-qualifying matches is
- --  kept, so what counts as a "safe" move is unchanged everywhere.
-
  Best_Positional_Score : Integer;
 
  type Draw_Effect is (No_Draw_Change, Reset_Draw, Add_Draw);
 
  procedure Select_Move (A, B : Integer; Effect : Draw_Effect) is
  begin
+    --  King Recapture Invariant: A king move (abs Tabuleiro(A) = 999) must NEVER
+    --  overwrite a piece or pawn move (abs Tabuleiro(cc) /= 999) capturing on the same destination B.
+    --  Recapturing with the King destroys castling rights and exposes the king in the center.
+    if cc /= 0 and then dd = B
+      and then abs Tabuleiro (A) = 999
+      and then abs Tabuleiro (cc) /= 999
+    then
+       return;
+    end if;
+
     cc := A;
     dd := B;
-    Search_Integration.Report_UCI(A, B);
     case Effect is
        when No_Draw_Change => null;
        when Reset_Draw    => Zerar_Contagem_Empate := True;
@@ -306,7 +480,13 @@ Procedure prechess2 is
     end if;
  end Select_Positional_Move;
 
-  procedure Alinha_Dama_Rei is
+
+Procedure prechess2 is
+
+ i,J: Integer:=1;  --Usados como memoria da 1a jogada; ver Segundo_Lance/Analize1/Analize2.
+ pragma Unreferenced (i, J);
+
+  procedure Alinha_Dama_Rei (I, J : in Integer) is
   Posicao_Dama, Posicao_Rei: Integer:=0;
   begin
      for A in 1..64 loop
@@ -336,39 +516,10 @@ Procedure prechess2 is
  --  below), exactly as in the legacy code ("Nao quiz proteger com o Rei so
  --  para evitar o pior") -- this is an inherited evaluation simplification,
  --  not something this cleanup changes.
- function Protegida(B, Piece_Threshold : Integer) return Boolean is
- begin
-  if Tabuleiro(B) > Piece_Threshold then
-     return False;
-  end if;
-  --  Early-exit on the first defender: Validade is a pure geometry oracle
-  --  (no board writes), so returning mid-scan is identical to the old
-  --  "set Result and finish the loop" form -- just far fewer calls in the
-  --  hot (k,l) trial loop that invokes this via Analize2.
-  for C in 1 .. 64 loop
-     if Validade(C,B)=True and Tabuleiro(C)>0 and Tabuleiro(C)/=999 then
-        return True;
-     end if;
-  end loop;
-  return False;
- end Protegida;
+
 
  procedure Analize3(i,J,K,L,M,N,Soma3l,Soma2l:integer) is
 
-  --  Mirror of Protegida for the other side: does ANY of the person's
-  --  pieces defend (i.e. could immediately recapture on) square Sq?
-  --  Validade handles capture geometry for the person's pieces itself,
-  --  including the person's pawn capture direction, because Sq holds a
-  --  computer (positive) piece at the moment this is asked.
-  function Person_Defends (Sq : Integer) return Boolean is
-  begin
-     for C in 1..64 loop
-        if Tabuleiro(C) < 0 and then Validade(C,Sq) then
-           return True;
-        end if;
-     end loop;
-     return False;
-  end Person_Defends;
 
   Ganho : constant Integer := Soma3l - Soma2l;
  begin
@@ -393,7 +544,8 @@ Procedure prechess2 is
   --  root board -- maintaining an existing threat from a different
   --  square is not a reason to move. Check threats are exempt.
   if (Ganho = 999 or else not Raiz_Ja_Ameacado(N))
-    and then (Tabuleiro(N) <= Ganho or else not Person_Defends(N))
+    and then (Casc_Value (Tabuleiro (N)) <= Casc_Value (Ganho)
+              or else not Person_Defends(N))
   then
      if Ganho=1   then Jogada_ameacaP(I,J):=True; end if;
      if Ganho=3   then Jogada_ameacaB(I,J):=True; end if;
@@ -426,10 +578,10 @@ Procedure prechess2 is
  begin
 
   if Soma2l - Soma1l=-1   then BackupPeao:=Jogada_PerdeP(I,J); Jogada_PerdeP(I,J):=True; end if;
-  if Soma2l - Soma1l=-3  and Protegida(L,-3)=false  then Jogada_PerdeB(I,J):=True; end if;
-  if Soma2l - Soma1l=-4  and Protegida(L,-4)=false then Jogada_PerdeC(I,J):=True; end if;
-  if Soma2l - Soma1l=-7  and Protegida(L,-7)=false  then Jogada_PerdeT(I,J):=True; end if;
-  if Soma2l - Soma1l=-20 and Protegida(L,-20)=false   then Jogada_PerdeD(I,J):=True; end if;
+  if Soma2l - Soma1l=-3  and Protegida(L,-Casc_Bishop)=false then Jogada_PerdeB(I,J):=True; end if;
+  if Soma2l - Soma1l=-4  and Protegida(L,-Casc_Knight)=false then Jogada_PerdeC(I,J):=True; end if;
+  if Soma2l - Soma1l=-7  and Protegida(L,-Casc_Rook)=false   then Jogada_PerdeT(I,J):=True; end if;
+  if Soma2l - Soma1l=-20 and Protegida(L,-Casc_Queen)=false  then Jogada_PerdeD(I,J):=True; end if;
   if Soma2l - Soma1l=-999 then Jogada_PerdeR(I,J):=True; end if;
  --Essa parte deve ser aprimorada pois nem sempre que der true ai voce efetivamente vai perder o Rei, a Dama
  --Usarei as funcoes Dama_protegida, torre_protegida, etc. :).
@@ -450,8 +602,8 @@ Procedure prechess2 is
  --E' um porcedimento e nao uma funcao pois ele recebe
  --como dado de entrada somente a posicao do tabuleiro.
    Temp1, Temp2: Integer;
-   Morre: array(1..64,1..64) of Boolean;
-   Exequemate_T: array(1..64,1..64) of Boolean;
+   Morre: array(1..64,1..64) of Boolean := (others => (others => False));
+   Exequemate_T: array(1..64,1..64) of Boolean := (others => (others => False));
  procedure S_Lance(Ii,Jj:Integer)  is --Procedimento dentro do Mate.
   begin
  --  Deliberately NO time-abort here (one used to be): S_Lance feeds the
@@ -508,6 +660,9 @@ Procedure prechess2 is
              end if;
             end if;
           end loop;
+         --  One legal escape refutes mate for this (I,J); scanning the
+         --  remaining own pieces cannot change the verdict.
+         exit when Exequemate_T(I,J)=False;
        end if;
   end loop;
 
@@ -522,8 +677,8 @@ procedure Mate_ele2(I,J:Integer) is
  --Esse procedimento serve para acabar com ele enquanto o
  --outro serve para saber se ele ta em mate ou n�o.
    Temp1, Temp2: Integer;
-   Morre: array(1..64,1..64) of Boolean;
-   Exequemate_T: array(1..64,1..64) of Boolean;
+   Morre: array(1..64,1..64) of Boolean := (others => (others => False));
+   Exequemate_T: array(1..64,1..64) of Boolean := (others => (others => False));
  procedure S_Lance(Ii,Jj:Integer)  is --Procedimento dentro do Mate.
   begin
  --  Deliberately NO time-abort here (one used to be): S_Lance feeds the
@@ -580,6 +735,9 @@ procedure Mate_ele2(I,J:Integer) is
              end if;
             end if;
           end loop;
+         --  One computer capture of the enemy king refutes the mate-in-one;
+         --  scanning the remaining own pieces cannot change the verdict.
+         exit when Exequemate_T(I,J)=False;
        end if;
   end loop;
 
@@ -592,20 +750,1607 @@ procedure Mate_ele2(I,J:Integer) is
  --   tier. The live ply-4 verdict is Jogada_Perde_Profunda, set in
  --   Quarto_Lance via the Quinto_Lance recovery test.)
 
- --  Ply 16 (Decimo_Sexto_Lance): the deliberately pessimistic leaf of
- --  the deep tactical check. For the opponent's final reply, only the quick
- --  material test is applied: if ANY opponent move drops the running sum
- --  back below Soma2l, the ply-15 recovery under test is treated as refuted.
- procedure Decimo_Sexto_Lance(Soma2l,Soma15l:integer; Refuted: in out Boolean) is
+ --  Ply 60 (Sexagesimo_Lance): the deliberately pessimistic leaf of
+ --  the deep tactical check at ply 60. If ANY opponent move drops the running sum
+ --  back below Soma2l, the ply-59 recovery under test is treated as refuted.
+ procedure Sexagesimo_Lance(Soma2l,Soma59l:integer; Refuted: in out Boolean) is
  begin
  Time_Management.Check_Time;
  if Time_Management.Search_Aborted then return; end if;
- DX_Loop:
+ DLX_Loop:
+ for d in 1..64 loop
+      if tabuleiro(d) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario119:=tabuleiro(d);--So para lembrar que peca era.
+         for e in 1..64 loop
+           if tabuleiro(e) >= 0 and then tabuleiro(e) /= 999 then
+            if validade(d,e)=true then
+            tabuleiro(d) := 0;
+            Temporario120:=tabuleiro(e);
+            tabuleiro(e):=Temporario119;
+            Soma60l:=Soma59l - Temporario120;
+
+            if Soma60l < Soma2l then
+               Refuted := True;
+            end if;
+
+            tabuleiro(e):=Temporario120;
+            tabuleiro(d):=Temporario119;
+
+            end if;
+           end if;
+           exit DLX_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DLX_Loop;
+ end Sexagesimo_Lance;
+
+ --  Ply 59 (Quinquagesimo_Nono_Lance): the computer's answer to the opponent's ply-58 counter.
+ procedure Quinquagesimo_Nono_Lance(Soma2l,Soma58l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DLIX_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario117:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario118:=tabuleiro(o);
+            tabuleiro(o):=Temporario117;
+            Soma59l:=Soma58l - Temporario118;
+
+            if Soma59l >= Soma2l then
+               Refuted := False;
+               Sexagesimo_Lance(Soma2l,Soma59l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario118;
+            tabuleiro(n):=Temporario117;
+
+            end if;
+           end if;
+           exit DLIX_Loop when Answered;
+         end loop;
+      end if;
+ end loop DLIX_Loop;
+ end Quinquagesimo_Nono_Lance;
+
+ --  Ply 58 (Quinquagesimo_Oitavo_Lance): the opponent's counter to the computer's ply-57 recovery.
+ procedure Quinquagesimo_Oitavo_Lance(Soma2l,Soma57l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DLVIII_Loop:
+ for l in 1..64 loop
+      if tabuleiro(l) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario115:=tabuleiro(l);--So para lembrar que peca era.
+         for m in 1..64 loop
+           if tabuleiro(m) >= 0 and then tabuleiro(m) /= 999 then
+            if validade(l,m)=true then
+            tabuleiro(l) := 0;
+            Temporario116:=tabuleiro(m);
+            tabuleiro(m):=Temporario115;
+            Soma58l:=Soma57l - Temporario116;
+
+            if Soma58l < Soma2l then
+               Answered := False;
+               Quinquagesimo_Nono_Lance(Soma2l,Soma58l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(m):=Temporario116;
+            tabuleiro(l):=Temporario115;
+
+            end if;
+           end if;
+           exit DLVIII_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DLVIII_Loop;
+ end Quinquagesimo_Oitavo_Lance;
+
+ --  Ply 57 (Quinquagesimo_Setimo_Lance): the computer's answer to the opponent's ply-56 counter.
+ procedure Quinquagesimo_Setimo_Lance(Soma2l,Soma56l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DLVII_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario113:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario114:=tabuleiro(o);
+            tabuleiro(o):=Temporario113;
+            Soma57l:=Soma56l - Temporario114;
+
+            if Soma57l >= Soma2l then
+               Refuted := False;
+               Quinquagesimo_Oitavo_Lance(Soma2l,Soma57l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario114;
+            tabuleiro(n):=Temporario113;
+
+            end if;
+           end if;
+           exit DLVII_Loop when Answered;
+         end loop;
+      end if;
+ end loop DLVII_Loop;
+ end Quinquagesimo_Setimo_Lance;
+
+ --  Ply 56 (Quinquagesimo_Sexto_Lance): the opponent's counter to the computer's ply-55 recovery.
+ procedure Quinquagesimo_Sexto_Lance(Soma2l,Soma55l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DLVI_Loop:
+ for l in 1..64 loop
+      if tabuleiro(l) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario111:=tabuleiro(l);--So para lembrar que peca era.
+         for m in 1..64 loop
+           if tabuleiro(m) >= 0 and then tabuleiro(m) /= 999 then
+            if validade(l,m)=true then
+            tabuleiro(l) := 0;
+            Temporario112:=tabuleiro(m);
+            tabuleiro(m):=Temporario111;
+            Soma56l:=Soma55l - Temporario112;
+
+            if Soma56l < Soma2l then
+               Answered := False;
+               Quinquagesimo_Setimo_Lance(Soma2l,Soma56l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(m):=Temporario112;
+            tabuleiro(l):=Temporario111;
+
+            end if;
+           end if;
+           exit DLVI_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DLVI_Loop;
+ end Quinquagesimo_Sexto_Lance;
+
+ --  Ply 55 (Quinquagesimo_Quinto_Lance): the computer's answer to the opponent's ply-54 counter.
+ procedure Quinquagesimo_Quinto_Lance(Soma2l,Soma54l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DLV_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario109:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario110:=tabuleiro(o);
+            tabuleiro(o):=Temporario109;
+            Soma55l:=Soma54l - Temporario110;
+
+            if Soma55l >= Soma2l then
+               Refuted := False;
+               Quinquagesimo_Sexto_Lance(Soma2l,Soma55l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario110;
+            tabuleiro(n):=Temporario109;
+
+            end if;
+           end if;
+           exit DLV_Loop when Answered;
+         end loop;
+      end if;
+ end loop DLV_Loop;
+ end Quinquagesimo_Quinto_Lance;
+
+ --  Ply 54 (Quinquagesimo_Quarto_Lance): the opponent's counter to the computer's ply-53 recovery.
+ procedure Quinquagesimo_Quarto_Lance(Soma2l,Soma53l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DLIV_Loop:
+ for l in 1..64 loop
+      if tabuleiro(l) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario107:=tabuleiro(l);--So para lembrar que peca era.
+         for m in 1..64 loop
+           if tabuleiro(m) >= 0 and then tabuleiro(m) /= 999 then
+            if validade(l,m)=true then
+            tabuleiro(l) := 0;
+            Temporario108:=tabuleiro(m);
+            tabuleiro(m):=Temporario107;
+            Soma54l:=Soma53l - Temporario108;
+
+            if Soma54l < Soma2l then
+               Answered := False;
+               Quinquagesimo_Quinto_Lance(Soma2l,Soma54l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(m):=Temporario108;
+            tabuleiro(l):=Temporario107;
+
+            end if;
+           end if;
+           exit DLIV_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DLIV_Loop;
+ end Quinquagesimo_Quarto_Lance;
+
+ --  Ply 53 (Quinquagesimo_Terceiro_Lance): the computer's answer to the opponent's ply-52 counter.
+ procedure Quinquagesimo_Terceiro_Lance(Soma2l,Soma52l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DLIII_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario105:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario106:=tabuleiro(o);
+            tabuleiro(o):=Temporario105;
+            Soma53l:=Soma52l - Temporario106;
+
+            if Soma53l >= Soma2l then
+               Refuted := False;
+               Quinquagesimo_Quarto_Lance(Soma2l,Soma53l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario106;
+            tabuleiro(n):=Temporario105;
+
+            end if;
+           end if;
+           exit DLIII_Loop when Answered;
+         end loop;
+      end if;
+ end loop DLIII_Loop;
+ end Quinquagesimo_Terceiro_Lance;
+
+ --  Ply 52 (Quinquagesimo_Segundo_Lance): the opponent's counter to the computer's ply-51 recovery.
+ procedure Quinquagesimo_Segundo_Lance(Soma2l,Soma51l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DLII_Loop:
+ for l in 1..64 loop
+      if tabuleiro(l) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario103:=tabuleiro(l);--So para lembrar que peca era.
+         for m in 1..64 loop
+           if tabuleiro(m) >= 0 and then tabuleiro(m) /= 999 then
+            if validade(l,m)=true then
+            tabuleiro(l) := 0;
+            Temporario104:=tabuleiro(m);
+            tabuleiro(m):=Temporario103;
+            Soma52l:=Soma51l - Temporario104;
+
+            if Soma52l < Soma2l then
+               Answered := False;
+               Quinquagesimo_Terceiro_Lance(Soma2l,Soma52l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(m):=Temporario104;
+            tabuleiro(l):=Temporario103;
+
+            end if;
+           end if;
+           exit DLII_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DLII_Loop;
+ end Quinquagesimo_Segundo_Lance;
+
+ --  Ply 51 (Quinquagesimo_Primeiro_Lance): the computer's answer to the opponent's ply-50 counter.
+ procedure Quinquagesimo_Primeiro_Lance(Soma2l,Soma50l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DLI_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario101:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario102:=tabuleiro(o);
+            tabuleiro(o):=Temporario101;
+            Soma51l:=Soma50l - Temporario102;
+
+            if Soma51l >= Soma2l then
+               Refuted := False;
+               Quinquagesimo_Segundo_Lance(Soma2l,Soma51l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario102;
+            tabuleiro(n):=Temporario101;
+
+            end if;
+           end if;
+           exit DLI_Loop when Answered;
+         end loop;
+      end if;
+ end loop DLI_Loop;
+ end Quinquagesimo_Primeiro_Lance;
+
+ --  Ply 50 (Quinquagesimo_Lance): the opponent's counter to the computer's ply-49 recovery.
+ procedure Quinquagesimo_Lance(Soma2l,Soma49l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DL_Loop:
+ for l in 1..64 loop
+      if tabuleiro(l) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario99:=tabuleiro(l);--So para lembrar que peca era.
+         for m in 1..64 loop
+           if tabuleiro(m) >= 0 and then tabuleiro(m) /= 999 then
+            if validade(l,m)=true then
+            tabuleiro(l) := 0;
+            Temporario100:=tabuleiro(m);
+            tabuleiro(m):=Temporario99;
+            Soma50l:=Soma49l - Temporario100;
+
+            if Soma50l < Soma2l then
+               Answered := False;
+               Quinquagesimo_Primeiro_Lance(Soma2l,Soma50l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(m):=Temporario100;
+            tabuleiro(l):=Temporario99;
+
+            end if;
+           end if;
+           exit DL_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DL_Loop;
+ end Quinquagesimo_Lance;
+
+ --  Ply 49 (Quadragesimo_Nono_Lance): the computer's answer to the opponent's ply-48 counter.
+ procedure Quadragesimo_Nono_Lance(Soma2l,Soma48l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DXLIX_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario97:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario98:=tabuleiro(o);
+            tabuleiro(o):=Temporario97;
+            Soma49l:=Soma48l - Temporario98;
+
+            if Soma49l >= Soma2l then
+               Refuted := False;
+               Quinquagesimo_Lance(Soma2l,Soma49l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario98;
+            tabuleiro(n):=Temporario97;
+
+            end if;
+           end if;
+           exit DXLIX_Loop when Answered;
+         end loop;
+      end if;
+ end loop DXLIX_Loop;
+ end Quadragesimo_Nono_Lance;
+
+ --  Ply 48 (Quadragesimo_Oitavo_Lance): the opponent's counter to the computer's ply-47 recovery.
+ procedure Quadragesimo_Oitavo_Lance(Soma2l,Soma47l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DXLVIII_Loop:
+ for l in 1..64 loop
+      if tabuleiro(l) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario95:=tabuleiro(l);--So para lembrar que peca era.
+         for m in 1..64 loop
+           if tabuleiro(m) >= 0 and then tabuleiro(m) /= 999 then
+            if validade(l,m)=true then
+            tabuleiro(l) := 0;
+            Temporario96:=tabuleiro(m);
+            tabuleiro(m):=Temporario95;
+            Soma48l:=Soma47l - Temporario96;
+
+            if Soma48l < Soma2l then
+               Answered := False;
+               Quadragesimo_Nono_Lance(Soma2l,Soma48l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(m):=Temporario96;
+            tabuleiro(l):=Temporario95;
+
+            end if;
+           end if;
+           exit DXLVIII_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DXLVIII_Loop;
+ end Quadragesimo_Oitavo_Lance;
+
+ --  Ply 47 (Quadragesimo_Setimo_Lance): the computer's answer to the opponent's ply-46 counter.
+ procedure Quadragesimo_Setimo_Lance(Soma2l,Soma46l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DXLVII_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario93:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario94:=tabuleiro(o);
+            tabuleiro(o):=Temporario93;
+            Soma47l:=Soma46l - Temporario94;
+
+            if Soma47l >= Soma2l then
+               Refuted := False;
+               Quadragesimo_Oitavo_Lance(Soma2l,Soma47l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario94;
+            tabuleiro(n):=Temporario93;
+
+            end if;
+           end if;
+           exit DXLVII_Loop when Answered;
+         end loop;
+      end if;
+ end loop DXLVII_Loop;
+ end Quadragesimo_Setimo_Lance;
+
+ --  Ply 46 (Quadragesimo_Sexto_Lance): the opponent's counter to the computer's ply-45 recovery.
+ procedure Quadragesimo_Sexto_Lance(Soma2l,Soma45l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DXLVI_Loop:
+ for l in 1..64 loop
+      if tabuleiro(l) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario91:=tabuleiro(l);--So para lembrar que peca era.
+         for m in 1..64 loop
+           if tabuleiro(m) >= 0 and then tabuleiro(m) /= 999 then
+            if validade(l,m)=true then
+            tabuleiro(l) := 0;
+            Temporario92:=tabuleiro(m);
+            tabuleiro(m):=Temporario91;
+            Soma46l:=Soma45l - Temporario92;
+
+            if Soma46l < Soma2l then
+               Answered := False;
+               Quadragesimo_Setimo_Lance(Soma2l,Soma46l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(m):=Temporario92;
+            tabuleiro(l):=Temporario91;
+
+            end if;
+           end if;
+           exit DXLVI_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DXLVI_Loop;
+ end Quadragesimo_Sexto_Lance;
+
+ --  Ply 45 (Quadragesimo_Quinto_Lance): the computer's answer to the opponent's ply-44 counter.
+ procedure Quadragesimo_Quinto_Lance(Soma2l,Soma44l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DXLV_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario89:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario90:=tabuleiro(o);
+            tabuleiro(o):=Temporario89;
+            Soma45l:=Soma44l - Temporario90;
+
+            if Soma45l >= Soma2l then
+               Refuted := False;
+               Quadragesimo_Sexto_Lance(Soma2l,Soma45l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario90;
+            tabuleiro(n):=Temporario89;
+
+            end if;
+           end if;
+           exit DXLV_Loop when Answered;
+         end loop;
+      end if;
+ end loop DXLV_Loop;
+ end Quadragesimo_Quinto_Lance;
+
+ --  Ply 44 (Quadragesimo_Quarto_Lance): the opponent's counter to the computer's ply-43 recovery.
+ procedure Quadragesimo_Quarto_Lance(Soma2l,Soma43l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DXLIV_Loop:
+ for l in 1..64 loop
+      if tabuleiro(l) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario87:=tabuleiro(l);--So para lembrar que peca era.
+         for m in 1..64 loop
+           if tabuleiro(m) >= 0 and then tabuleiro(m) /= 999 then
+            if validade(l,m)=true then
+            tabuleiro(l) := 0;
+            Temporario88:=tabuleiro(m);
+            tabuleiro(m):=Temporario87;
+            Soma44l:=Soma43l - Temporario88;
+
+            if Soma44l < Soma2l then
+               Answered := False;
+               Quadragesimo_Quinto_Lance(Soma2l,Soma44l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(m):=Temporario88;
+            tabuleiro(l):=Temporario87;
+
+            end if;
+           end if;
+           exit DXLIV_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DXLIV_Loop;
+ end Quadragesimo_Quarto_Lance;
+
+ --  Ply 43 (Quadragesimo_Terceiro_Lance): the computer's answer to the opponent's ply-42 counter.
+ procedure Quadragesimo_Terceiro_Lance(Soma2l,Soma42l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DXLIII_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario85:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario86:=tabuleiro(o);
+            tabuleiro(o):=Temporario85;
+            Soma43l:=Soma42l - Temporario86;
+
+            if Soma43l >= Soma2l then
+               Refuted := False;
+               Quadragesimo_Quarto_Lance(Soma2l,Soma43l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario86;
+            tabuleiro(n):=Temporario85;
+
+            end if;
+           end if;
+           exit DXLIII_Loop when Answered;
+         end loop;
+      end if;
+ end loop DXLIII_Loop;
+ end Quadragesimo_Terceiro_Lance;
+
+ --  Ply 42 (Quadragesimo_Segundo_Lance): the opponent's counter to the computer's ply-41 recovery.
+ procedure Quadragesimo_Segundo_Lance(Soma2l,Soma41l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DXLII_Loop:
+ for l in 1..64 loop
+      if tabuleiro(l) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario83:=tabuleiro(l);--So para lembrar que peca era.
+         for m in 1..64 loop
+           if tabuleiro(m) >= 0 and then tabuleiro(m) /= 999 then
+            if validade(l,m)=true then
+            tabuleiro(l) := 0;
+            Temporario84:=tabuleiro(m);
+            tabuleiro(m):=Temporario83;
+            Soma42l:=Soma41l - Temporario84;
+
+            if Soma42l < Soma2l then
+               Answered := False;
+               Quadragesimo_Terceiro_Lance(Soma2l,Soma42l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(m):=Temporario84;
+            tabuleiro(l):=Temporario83;
+
+            end if;
+           end if;
+           exit DXLII_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DXLII_Loop;
+ end Quadragesimo_Segundo_Lance;
+
+ --  Ply 41 (Quadragesimo_Primeiro_Lance): the computer's answer to the opponent's ply-40 counter.
+ procedure Quadragesimo_Primeiro_Lance(Soma2l,Soma40l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DXLI_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario81:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario82:=tabuleiro(o);
+            tabuleiro(o):=Temporario81;
+            Soma41l:=Soma40l - Temporario82;
+
+            if Soma41l >= Soma2l then
+               Refuted := False;
+               Quadragesimo_Segundo_Lance(Soma2l,Soma41l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario82;
+            tabuleiro(n):=Temporario81;
+
+            end if;
+           end if;
+           exit DXLI_Loop when Answered;
+         end loop;
+      end if;
+ end loop DXLI_Loop;
+ end Quadragesimo_Primeiro_Lance;
+
+ --  Ply 40 (Quadragesimo_Lance): the opponent's counter to the computer's ply-39 recovery.
+ procedure Quadragesimo_Lance(Soma2l,Soma39l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DXL_Loop:
+ for d in 1..64 loop
+      if tabuleiro(d) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario79:=tabuleiro(d);--So para lembrar que peca era.
+         for e in 1..64 loop
+           if tabuleiro(e) >= 0 and then tabuleiro(e) /= 999 then
+            if validade(d,e)=true then
+            tabuleiro(d) := 0;
+            Temporario80:=tabuleiro(e);
+            tabuleiro(e):=Temporario79;
+            Soma40l:=Soma39l - Temporario80;
+
+            if Soma40l < Soma2l then
+               Answered := False;
+               Quadragesimo_Primeiro_Lance(Soma2l,Soma40l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(e):=Temporario80;
+            tabuleiro(d):=Temporario79;
+
+            end if;
+           end if;
+           exit DXL_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DXL_Loop;
+ end Quadragesimo_Lance;
+
+ --  Ply 39 (Trigesimo_Nono_Lance): the computer's answer to the opponent's ply-38 counter.
+ procedure Trigesimo_Nono_Lance(Soma2l,Soma38l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DXXXIX_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario77:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario78:=tabuleiro(o);
+            tabuleiro(o):=Temporario77;
+            Soma39l:=Soma38l - Temporario78;
+
+            if Soma39l >= Soma2l then
+               Refuted := False;
+               Quadragesimo_Lance(Soma2l,Soma39l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario78;
+            tabuleiro(n):=Temporario77;
+
+            end if;
+           end if;
+           exit DXXXIX_Loop when Answered;
+         end loop;
+      end if;
+ end loop DXXXIX_Loop;
+ end Trigesimo_Nono_Lance;
+
+ --  Ply 38 (Trigesimo_Oitavo_Lance): the opponent's counter to the computer's ply-37 recovery.
+ procedure Trigesimo_Oitavo_Lance(Soma2l,Soma37l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DXXXVIII_Loop:
+ for l in 1..64 loop
+      if tabuleiro(l) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario75:=tabuleiro(l);--So para lembrar que peca era.
+         for m in 1..64 loop
+           if tabuleiro(m) >= 0 and then tabuleiro(m) /= 999 then
+            if validade(l,m)=true then
+            tabuleiro(l) := 0;
+            Temporario76:=tabuleiro(m);
+            tabuleiro(m):=Temporario75;
+            Soma38l:=Soma37l - Temporario76;
+
+            if Soma38l < Soma2l then
+               Answered := False;
+               Trigesimo_Nono_Lance(Soma2l,Soma38l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(m):=Temporario76;
+            tabuleiro(l):=Temporario75;
+
+            end if;
+           end if;
+           exit DXXXVIII_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DXXXVIII_Loop;
+ end Trigesimo_Oitavo_Lance;
+
+ --  Ply 37 (Trigesimo_Setimo_Lance): the computer's answer to the opponent's ply-36 counter.
+ procedure Trigesimo_Setimo_Lance(Soma2l,Soma36l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DXXXVII_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario73:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario74:=tabuleiro(o);
+            tabuleiro(o):=Temporario73;
+            Soma37l:=Soma36l - Temporario74;
+
+            if Soma37l >= Soma2l then
+               Refuted := False;
+               Trigesimo_Oitavo_Lance(Soma2l,Soma37l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario74;
+            tabuleiro(n):=Temporario73;
+
+            end if;
+           end if;
+           exit DXXXVII_Loop when Answered;
+         end loop;
+      end if;
+ end loop DXXXVII_Loop;
+ end Trigesimo_Setimo_Lance;
+
+ --  Ply 36 (Trigesimo_Sexto_Lance): the opponent's counter to the computer's ply-35 recovery.
+ procedure Trigesimo_Sexto_Lance(Soma2l,Soma35l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DXXXVI_Loop:
+ for l in 1..64 loop
+      if tabuleiro(l) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario71:=tabuleiro(l);--So para lembrar que peca era.
+         for m in 1..64 loop
+           if tabuleiro(m) >= 0 and then tabuleiro(m) /= 999 then
+            if validade(l,m)=true then
+            tabuleiro(l) := 0;
+            Temporario72:=tabuleiro(m);
+            tabuleiro(m):=Temporario71;
+            Soma36l:=Soma35l - Temporario72;
+
+            if Soma36l < Soma2l then
+               Answered := False;
+               Trigesimo_Setimo_Lance(Soma2l,Soma36l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(m):=Temporario72;
+            tabuleiro(l):=Temporario71;
+
+            end if;
+           end if;
+           exit DXXXVI_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DXXXVI_Loop;
+ end Trigesimo_Sexto_Lance;
+
+ --  Ply 35 (Trigesimo_Quinto_Lance): the computer's answer to the opponent's ply-34 counter.
+ procedure Trigesimo_Quinto_Lance(Soma2l,Soma34l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DXXXV_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario69:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario70:=tabuleiro(o);
+            tabuleiro(o):=Temporario69;
+            Soma35l:=Soma34l - Temporario70;
+
+            if Soma35l >= Soma2l then
+               Refuted := False;
+               Trigesimo_Sexto_Lance(Soma2l,Soma35l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario70;
+            tabuleiro(n):=Temporario69;
+
+            end if;
+           end if;
+           exit DXXXV_Loop when Answered;
+         end loop;
+      end if;
+ end loop DXXXV_Loop;
+ end Trigesimo_Quinto_Lance;
+
+ --  Ply 34 (Trigesimo_Quarto_Lance): the opponent's counter to the computer's ply-33 recovery.
+ procedure Trigesimo_Quarto_Lance(Soma2l,Soma33l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DXXXIV_Loop:
+ for l in 1..64 loop
+      if tabuleiro(l) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario67:=tabuleiro(l);--So para lembrar que peca era.
+         for m in 1..64 loop
+           if tabuleiro(m) >= 0 and then tabuleiro(m) /= 999 then
+            if validade(l,m)=true then
+            tabuleiro(l) := 0;
+            Temporario68:=tabuleiro(m);
+            tabuleiro(m):=Temporario67;
+            Soma34l:=Soma33l - Temporario68;
+
+            if Soma34l < Soma2l then
+               Answered := False;
+               Trigesimo_Quinto_Lance(Soma2l,Soma34l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(m):=Temporario68;
+            tabuleiro(l):=Temporario67;
+
+            end if;
+           end if;
+           exit DXXXIV_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DXXXIV_Loop;
+ end Trigesimo_Quarto_Lance;
+
+ --  Ply 33 (Trigesimo_Terceiro_Lance): the computer's answer to the opponent's ply-32 counter.
+ procedure Trigesimo_Terceiro_Lance(Soma2l,Soma32l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DXXXIII_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario65:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario66:=tabuleiro(o);
+            tabuleiro(o):=Temporario65;
+            Soma33l:=Soma32l - Temporario66;
+
+            if Soma33l >= Soma2l then
+               Refuted := False;
+               Trigesimo_Quarto_Lance(Soma2l,Soma33l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario66;
+            tabuleiro(n):=Temporario65;
+
+            end if;
+           end if;
+           exit DXXXIII_Loop when Answered;
+         end loop;
+      end if;
+ end loop DXXXIII_Loop;
+ end Trigesimo_Terceiro_Lance;
+
+ --  Ply 32 (Trigesimo_Segundo_Lance): the opponent's counter to the computer's ply-31 recovery.
+ procedure Trigesimo_Segundo_Lance(Soma2l,Soma31l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DXXXII_Loop:
+ for l in 1..64 loop
+      if tabuleiro(l) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario63:=tabuleiro(l);--So para lembrar que peca era.
+         for m in 1..64 loop
+           if tabuleiro(m) >= 0 and then tabuleiro(m) /= 999 then
+            if validade(l,m)=true then
+            tabuleiro(l) := 0;
+            Temporario64:=tabuleiro(m);
+            tabuleiro(m):=Temporario63;
+            Soma32l:=Soma31l - Temporario64;
+
+            if Soma32l < Soma2l then
+               Answered := False;
+               Trigesimo_Terceiro_Lance(Soma2l,Soma32l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(m):=Temporario64;
+            tabuleiro(l):=Temporario63;
+
+            end if;
+           end if;
+           exit DXXXII_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DXXXII_Loop;
+ end Trigesimo_Segundo_Lance;
+
+ --  Ply 31 (Trigesimo_Primeiro_Lance): the computer's answer to the opponent's ply-30 counter.
+ procedure Trigesimo_Primeiro_Lance(Soma2l,Soma30l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DXXXI_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario61:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario62:=tabuleiro(o);
+            tabuleiro(o):=Temporario61;
+            Soma31l:=Soma30l - Temporario62;
+
+            if Soma31l >= Soma2l then
+               Refuted := False;
+               Trigesimo_Segundo_Lance(Soma2l,Soma31l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario62;
+            tabuleiro(n):=Temporario61;
+
+            end if;
+           end if;
+           exit DXXXI_Loop when Answered;
+         end loop;
+      end if;
+ end loop DXXXI_Loop;
+ end Trigesimo_Primeiro_Lance;
+
+ --  Ply 30 (Trigesimo_Lance): the opponent's counter to the computer's ply-29 recovery.
+ procedure Trigesimo_Lance(Soma2l,Soma29l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DXXX_Loop:
+ for l in 1..64 loop
+      if tabuleiro(l) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario59:=tabuleiro(l);--So para lembrar que peca era.
+         for m in 1..64 loop
+           if tabuleiro(m) >= 0 and then tabuleiro(m) /= 999 then
+            if validade(l,m)=true then
+            tabuleiro(l) := 0;
+            Temporario60:=tabuleiro(m);
+            tabuleiro(m):=Temporario59;
+            Soma30l:=Soma29l - Temporario60;
+
+            if Soma30l < Soma2l then
+               Answered := False;
+               Trigesimo_Primeiro_Lance(Soma2l,Soma30l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(m):=Temporario60;
+            tabuleiro(l):=Temporario59;
+
+            end if;
+           end if;
+           exit DXXX_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DXXX_Loop;
+ end Trigesimo_Lance;
+
+ --  Ply 29 (Vigesimo_Nono_Lance): the computer's answer to the opponent's ply-28 counter.
+ procedure Vigesimo_Nono_Lance(Soma2l,Soma28l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DXXIX_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario57:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario58:=tabuleiro(o);
+            tabuleiro(o):=Temporario57;
+            Soma29l:=Soma28l - Temporario58;
+
+            if Soma29l >= Soma2l then
+               Refuted := False;
+               Trigesimo_Lance(Soma2l,Soma29l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario58;
+            tabuleiro(n):=Temporario57;
+
+            end if;
+           end if;
+           exit DXXIX_Loop when Answered;
+         end loop;
+      end if;
+ end loop DXXIX_Loop;
+ end Vigesimo_Nono_Lance;
+
+ --  Ply 28 (Vigesimo_Oitavo_Lance): the opponent's counter to the computer's ply-27 recovery.
+ procedure Vigesimo_Oitavo_Lance(Soma2l,Soma27l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DXXVIII_Loop:
+ for l in 1..64 loop
+      if tabuleiro(l) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario55:=tabuleiro(l);--So para lembrar que peca era.
+         for m in 1..64 loop
+           if tabuleiro(m) >= 0 and then tabuleiro(m) /= 999 then
+            if validade(l,m)=true then
+            tabuleiro(l) := 0;
+            Temporario56:=tabuleiro(m);
+            tabuleiro(m):=Temporario55;
+            Soma28l:=Soma27l - Temporario56;
+
+            if Soma28l < Soma2l then
+               Answered := False;
+               Vigesimo_Nono_Lance(Soma2l,Soma28l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(m):=Temporario56;
+            tabuleiro(l):=Temporario55;
+
+            end if;
+           end if;
+           exit DXXVIII_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DXXVIII_Loop;
+ end Vigesimo_Oitavo_Lance;
+
+ --  Ply 27 (Vigesimo_Setimo_Lance): the computer's answer to the opponent's ply-26 counter.
+ procedure Vigesimo_Setimo_Lance(Soma2l,Soma26l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DXXVII_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario53:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario54:=tabuleiro(o);
+            tabuleiro(o):=Temporario53;
+            Soma27l:=Soma26l - Temporario54;
+
+            if Soma27l >= Soma2l then
+               Refuted := False;
+               Vigesimo_Oitavo_Lance(Soma2l,Soma27l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario54;
+            tabuleiro(n):=Temporario53;
+
+            end if;
+           end if;
+           exit DXXVII_Loop when Answered;
+         end loop;
+      end if;
+ end loop DXXVII_Loop;
+ end Vigesimo_Setimo_Lance;
+
+ --  Ply 26 (Vigesimo_Sexto_Lance): intermediate verifier for opponent's ply-26 reply.
+ procedure Vigesimo_Sexto_Lance(Soma2l,Soma25l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DXXVI_Loop:
+ for d in 1..64 loop
+      if tabuleiro(d) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario51:=tabuleiro(d);--So para lembrar que peca era.
+         for e in 1..64 loop
+           if tabuleiro(e) >= 0 and then tabuleiro(e) /= 999 then
+            if validade(d,e)=true then
+            tabuleiro(d) := 0;
+            Temporario52:=tabuleiro(e);
+            tabuleiro(e):=Temporario51;
+            Soma26l:=Soma25l - Temporario52;
+
+            if Soma26l < Soma2l then
+               Answered := False;
+               Vigesimo_Setimo_Lance(Soma2l,Soma26l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(e):=Temporario52;
+            tabuleiro(d):=Temporario51;
+
+            end if;
+           end if;
+           exit DXXVI_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DXXVI_Loop;
+ end Vigesimo_Sexto_Lance;
+
+ --  Ply 25 (Vigesimo_Quinto_Lance): the computer's answer to the
+ --  opponent's ply-24 counter. It must recover to at least Soma2l and
+ --  survive the pessimistic ply-26 leaf.
+ procedure Vigesimo_Quinto_Lance(Soma2l,Soma24l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DXXV_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario49:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario50:=tabuleiro(o);
+            tabuleiro(o):=Temporario49;
+            Soma25l:=Soma24l - Temporario50;
+
+            if Soma25l >= Soma2l then
+               Refuted := False;
+               Vigesimo_Sexto_Lance(Soma2l,Soma25l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario50;
+            tabuleiro(n):=Temporario49;
+
+            end if;
+           end if;
+           exit DXXV_Loop when Answered;
+         end loop;
+      end if;
+ end loop DXXV_Loop;
+ end Vigesimo_Quinto_Lance;
+
+ --  Ply 24 (Vigesimo_Quarto_Lance): mirrors earlier even plies. An opponent
+ --  ply-24 reply below Soma2l refutes the ply-23 answer only if the computer
+ --  has no ply-25 continuation surviving to ply 26.
+ procedure Vigesimo_Quarto_Lance(Soma2l,Soma23l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DXXIV_Loop:
+ for d in 1..64 loop
+      if tabuleiro(d) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario47:=tabuleiro(d);--So para lembrar que peca era.
+         for e in 1..64 loop
+           if tabuleiro(e) >= 0 and then tabuleiro(e) /= 999 then
+            if validade(d,e)=true then
+            tabuleiro(d) := 0;
+            Temporario48:=tabuleiro(e);
+            tabuleiro(e):=Temporario47;
+            Soma24l:=Soma23l - Temporario48;
+
+            if Soma24l < Soma2l then
+               Answered := False;
+               Vigesimo_Quinto_Lance(Soma2l,Soma24l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(e):=Temporario48;
+            tabuleiro(d):=Temporario47;
+
+            end if;
+           end if;
+           exit DXXIV_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DXXIV_Loop;
+ end Vigesimo_Quarto_Lance;
+
+ --  Ply 23 (Vigesimo_Terceiro_Lance): computer's answer to ply-22 counter.
+ procedure Vigesimo_Terceiro_Lance(Soma2l,Soma22l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DXXIII_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario45:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario46:=tabuleiro(o);
+            tabuleiro(o):=Temporario45;
+            Soma23l:=Soma22l - Temporario46;
+
+            if Soma23l >= Soma2l then
+               Refuted := False;
+               Vigesimo_Quarto_Lance(Soma2l,Soma23l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario46;
+            tabuleiro(n):=Temporario45;
+
+            end if;
+           end if;
+           exit DXXIII_Loop when Answered;
+         end loop;
+      end if;
+ end loop DXXIII_Loop;
+ end Vigesimo_Terceiro_Lance;
+
+ --  Ply 22 (Vigesimo_Segundo_Lance): opponent ply-22 counter.
+ procedure Vigesimo_Segundo_Lance(Soma2l,Soma21l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DXXII_Loop:
+ for d in 1..64 loop
+      if tabuleiro(d) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario43:=tabuleiro(d);--So para lembrar que peca era.
+         for e in 1..64 loop
+           if tabuleiro(e) >= 0 and then tabuleiro(e) /= 999 then
+            if validade(d,e)=true then
+            tabuleiro(d) := 0;
+            Temporario44:=tabuleiro(e);
+            tabuleiro(e):=Temporario43;
+            Soma22l:=Soma21l - Temporario44;
+
+            if Soma22l < Soma2l then
+               Answered := False;
+               Vigesimo_Terceiro_Lance(Soma2l,Soma22l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(e):=Temporario44;
+            tabuleiro(d):=Temporario43;
+
+            end if;
+           end if;
+           exit DXXII_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DXXII_Loop;
+ end Vigesimo_Segundo_Lance;
+
+ --  Ply 21 (Vigesimo_Primeiro_Lance): computer's answer to ply-20 counter.
+ procedure Vigesimo_Primeiro_Lance(Soma2l,Soma20l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DXXI_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario41:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario42:=tabuleiro(o);
+            tabuleiro(o):=Temporario41;
+            Soma21l:=Soma20l - Temporario42;
+
+            if Soma21l >= Soma2l then
+               Refuted := False;
+               Vigesimo_Segundo_Lance(Soma2l,Soma21l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario42;
+            tabuleiro(n):=Temporario41;
+
+            end if;
+           end if;
+           exit DXXI_Loop when Answered;
+         end loop;
+      end if;
+ end loop DXXI_Loop;
+ end Vigesimo_Primeiro_Lance;
+
+ --  Ply 20 (Vigesimo_Lance): opponent ply-20 counter.
+ procedure Vigesimo_Lance(Soma2l,Soma19l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DXX_Loop:
+ for d in 1..64 loop
+      if tabuleiro(d) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario39:=tabuleiro(d);--So para lembrar que peca era.
+         for e in 1..64 loop
+           if tabuleiro(e) >= 0 and then tabuleiro(e) /= 999 then
+            if validade(d,e)=true then
+            tabuleiro(d) := 0;
+            Temporario40:=tabuleiro(e);
+            tabuleiro(e):=Temporario39;
+            Soma20l:=Soma19l - Temporario40;
+
+            if Soma20l < Soma2l then
+               Answered := False;
+               Vigesimo_Primeiro_Lance(Soma2l,Soma20l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(e):=Temporario40;
+            tabuleiro(d):=Temporario39;
+
+            end if;
+           end if;
+           exit DXX_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DXX_Loop;
+ end Vigesimo_Lance;
+
+ --  Ply 19 (Decimo_Nono_Lance): computer's answer to ply-18 counter.
+ procedure Decimo_Nono_Lance(Soma2l,Soma18l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DXIX_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario37:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario38:=tabuleiro(o);
+            tabuleiro(o):=Temporario37;
+            Soma19l:=Soma18l - Temporario38;
+
+            if Soma19l >= Soma2l then
+               Refuted := False;
+               Vigesimo_Lance(Soma2l,Soma19l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario38;
+            tabuleiro(n):=Temporario37;
+
+            end if;
+           end if;
+           exit DXIX_Loop when Answered;
+         end loop;
+      end if;
+ end loop DXIX_Loop;
+ end Decimo_Nono_Lance;
+
+ --  Ply 18 (Decimo_Oitavo_Lance): opponent ply-18 counter.
+ procedure Decimo_Oitavo_Lance(Soma2l,Soma17l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DXVIII_Loop:
+ for d in 1..64 loop
+      if tabuleiro(d) < 0 then   --Ou seja, se tem uma peca da pessoa.
+         Temporario35:=tabuleiro(d);--So para lembrar que peca era.
+         for e in 1..64 loop
+           if tabuleiro(e) >= 0 and then tabuleiro(e) /= 999 then
+            if validade(d,e)=true then
+            tabuleiro(d) := 0;
+            Temporario36:=tabuleiro(e);
+            tabuleiro(e):=Temporario35;
+            Soma18l:=Soma17l - Temporario36;
+
+            if Soma18l < Soma2l then
+               Answered := False;
+               Decimo_Nono_Lance(Soma2l,Soma18l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
+            end if;
+
+            tabuleiro(e):=Temporario36;
+            tabuleiro(d):=Temporario35;
+
+            end if;
+           end if;
+           exit DXVIII_Loop when Refuted;
+         end loop;
+      end if;
+ end loop DXVIII_Loop;
+ end Decimo_Oitavo_Lance;
+
+ --  Ply 17 (Decimo_Setimo_Lance): the computer's answer to the
+ --  opponent's ply-16 counter. It must recover to at least Soma2l and
+ --  survive subsequent counter-attacks down to ply 26.
+ procedure Decimo_Setimo_Lance(Soma2l,Soma16l:integer; Answered: in out Boolean) is
+ Refuted : Boolean;
+ begin
+ DXVII_Loop:
+ for n in 1..64 loop
+      if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
+         Temporario33:=tabuleiro(n);--So para lembrar que peca era.
+         for o in 1..64 loop
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
+            if validade(n,o)=true then
+            tabuleiro(n) := 0;
+            Temporario34:=tabuleiro(o);
+            tabuleiro(o):=Temporario33;
+            Soma17l:=Soma16l - Temporario34;
+
+            if Soma17l >= Soma2l then
+               Refuted := False;
+               Decimo_Oitavo_Lance(Soma2l,Soma17l,Refuted);
+               if not Refuted then
+                  Answered := True;
+               end if;
+            end if;
+
+            tabuleiro(o):=Temporario34;
+            tabuleiro(n):=Temporario33;
+
+            end if;
+           end if;
+           exit DXVII_Loop when Answered;
+         end loop;
+      end if;
+ end loop DXVII_Loop;
+ end Decimo_Setimo_Lance;
+
+ --  Ply 16 (Decimo_Sexto_Lance): now mirrors earlier even plies. An opponent
+ --  ply-16 reply below Soma2l refutes the ply-15 answer only if the computer
+ --  has no ply-17 continuation surviving to ply 26.
+ procedure Decimo_Sexto_Lance(Soma2l,Soma15l:integer; Refuted: in out Boolean) is
+ Answered : Boolean;
+ begin
+ Time_Management.Check_Time;
+ if Time_Management.Search_Aborted then return; end if;
+ DXVI_Loop:
  for d in 1..64 loop
       if tabuleiro(d) < 0 then   --Ou seja, se tem uma peca da pessoa.
          Temporario31:=tabuleiro(d);--So para lembrar que peca era.
          for e in 1..64 loop
-           if tabuleiro(e) >= 0 then
+           if tabuleiro(e) >= 0 and then tabuleiro(e) /= 999 then
             if validade(d,e)=true then
             tabuleiro(d) := 0;
             Temporario32:=tabuleiro(e);
@@ -613,7 +2358,11 @@ procedure Mate_ele2(I,J:Integer) is
             Soma16l:=Soma15l - Temporario32;
 
             if Soma16l < Soma2l then
-               Refuted := True;
+               Answered := False;
+               Decimo_Setimo_Lance(Soma2l,Soma16l,Answered);
+               if not Answered then
+                  Refuted := True;
+               end if;
             end if;
 
             tabuleiro(e):=Temporario32;
@@ -621,10 +2370,10 @@ procedure Mate_ele2(I,J:Integer) is
 
             end if;
            end if;
-           exit DX_Loop when Refuted;
+           exit DXVI_Loop when Refuted;
          end loop;
       end if;
- end loop DX_Loop;
+ end loop DXVI_Loop;
  end Decimo_Sexto_Lance;
 
  --  Ply 15 (Decimo_Quinto_Lance): the computer's answer to the
@@ -638,7 +2387,7 @@ procedure Mate_ele2(I,J:Integer) is
       if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
          Temporario29:=tabuleiro(n);--So para lembrar que peca era.
          for o in 1..64 loop
-           if tabuleiro(o) <= 0 then
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
             if validade(n,o)=true then
             tabuleiro(n) := 0;
             Temporario30:=tabuleiro(o);
@@ -678,7 +2427,7 @@ procedure Mate_ele2(I,J:Integer) is
       if tabuleiro(d) < 0 then   --Ou seja, se tem uma peca da pessoa.
          Temporario27:=tabuleiro(d);--So para lembrar que peca era.
          for e in 1..64 loop
-           if tabuleiro(e) >= 0 then
+           if tabuleiro(e) >= 0 and then tabuleiro(e) /= 999 then
             if validade(d,e)=true then
             tabuleiro(d) := 0;
             Temporario28:=tabuleiro(e);
@@ -715,7 +2464,7 @@ procedure Mate_ele2(I,J:Integer) is
       if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
          Temporario25:=tabuleiro(n);--So para lembrar que peca era.
          for o in 1..64 loop
-           if tabuleiro(o) <= 0 then
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
             if validade(n,o)=true then
             tabuleiro(n) := 0;
             Temporario26:=tabuleiro(o);
@@ -754,7 +2503,7 @@ procedure Mate_ele2(I,J:Integer) is
       if tabuleiro(t) < 0 then   --Ou seja, se tem uma peca da pessoa.
          Temporario23:=tabuleiro(t);--So para lembrar que peca era.
          for u in 1..64 loop
-           if tabuleiro(u) >= 0 then
+           if tabuleiro(u) >= 0 and then tabuleiro(u) /= 999 then
             if validade(t,u)=true then
             tabuleiro(t) := 0;
             Temporario24:=tabuleiro(u);
@@ -791,7 +2540,7 @@ procedure Mate_ele2(I,J:Integer) is
       if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
          Temporario21:=tabuleiro(n);--So para lembrar que peca era.
          for o in 1..64 loop
-           if tabuleiro(o) <= 0 then
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
             if validade(n,o)=true then
             tabuleiro(n) := 0;
             Temporario22:=tabuleiro(o);
@@ -830,7 +2579,7 @@ procedure Mate_ele2(I,J:Integer) is
       if tabuleiro(d) < 0 then   --Ou seja, se tem uma peca da pessoa.
          Temporario19:=tabuleiro(d);--So para lembrar que peca era.
          for e in 1..64 loop
-           if tabuleiro(e) >= 0 then
+           if tabuleiro(e) >= 0 and then tabuleiro(e) /= 999 then
             if validade(d,e)=true then
             tabuleiro(d) := 0;
             Temporario20:=tabuleiro(e);
@@ -868,7 +2617,7 @@ procedure Mate_ele2(I,J:Integer) is
       if tabuleiro(n) > 0 then   --Ou seja, se tem uma peca do computador.
          Temporario17:=tabuleiro(n);--So para lembrar que peca era.
          for o in 1..64 loop
-           if tabuleiro(o) <= 0 then
+           if tabuleiro(o) <= 0 and then tabuleiro(o) /= -999 then
             if validade(n,o)=true then
             tabuleiro(n) := 0;
             Temporario18:=tabuleiro(o);
@@ -917,7 +2666,7 @@ procedure Mate_ele2(I,J:Integer) is
       if tabuleiro(t) < 0 then   --Ou seja, se tem uma peca da pessoa.
          Temporario15:=tabuleiro(t);--So para lembrar que peca era.
          for u in 1..64 loop
-           if tabuleiro(u) >= 0 then
+           if tabuleiro(u) >= 0 and then tabuleiro(u) /= 999 then
             if validade(t,u)=true then
             tabuleiro(t) := 0;
             Temporario16:=tabuleiro(u);
@@ -956,7 +2705,7 @@ procedure Mate_ele2(I,J:Integer) is
       if tabuleiro(v) > 0 then   --Ou seja, se tem uma peca do computador.
          Temporario13:=tabuleiro(v);--So para lembrar que peca era.
          for w in 1..64 loop
-           if tabuleiro(w) <= 0 then
+           if tabuleiro(w) <= 0 and then tabuleiro(w) /= -999 then
             if validade(v,w)=true then
             tabuleiro(v) := 0;
             Temporario14:=tabuleiro(w);
@@ -1007,7 +2756,7 @@ procedure Mate_ele2(I,J:Integer) is
       if tabuleiro(x) < 0 then   --Ou seja, se tem uma peca da pessoa.
          Temporario11:=tabuleiro(x);--So para lembrar que peca era.
          for y in 1..64 loop
-           if tabuleiro(y) >= 0 then
+           if tabuleiro(y) >= 0 and then tabuleiro(y) /= 999 then
             if validade(x,y)=true then
             tabuleiro(x) := 0;
             Temporario12:=tabuleiro(y);
@@ -1042,7 +2791,7 @@ procedure Mate_ele2(I,J:Integer) is
  --  Soma2l (the level just before the ply-3 move started this little
  --  exchange) -- i.e. "the computer has a good enough answer to this
  --  specific opponent reply" -- AND that answer survives the continuation
- --  through `Decimo_Sexto_Lance` / ply 16.
+ --  through `Vigesimo_Sexto_Lance` / ply 26.
  --  The search stops early via the named-loop exit the instant one
  --  surviving recovery is found, since one is enough.
  procedure Quinto_Lance(Soma2l,Soma4l:integer; Recovered: in out Boolean) is
@@ -1055,7 +2804,7 @@ procedure Mate_ele2(I,J:Integer) is
       if tabuleiro(r) > 0 then   --Ou seja, se tem uma peca do computador.
          Temporario9:=tabuleiro(r);--So para lembrar que peca era.
          for s in 1..64 loop
-           if tabuleiro(s) <= 0 then
+           if tabuleiro(s) <= 0 and then tabuleiro(s) /= -999 then
             if validade(r,s)=true then
             tabuleiro(r) := 0;
             Temporario10:=tabuleiro(s);
@@ -1111,7 +2860,7 @@ procedure Mate_ele2(I,J:Integer) is
       if tabuleiro(p) < 0 then   --Ou seja, se tem uma peca da pessoa.
          Temporario7:=tabuleiro(p);--So para lembrar que peca era.
          for q in 1..64 loop
-           if tabuleiro(q) >= 0 then
+           if tabuleiro(q) >= 0 and then tabuleiro(q) /= 999 then
             if validade(p,q)=true then
             tabuleiro(p) := 0;
             Temporario8:=tabuleiro(q);
@@ -1182,10 +2931,13 @@ procedure Mate_ele2(I,J:Integer) is
             Analize3(i,J,K,L,M,N,Soma3l,Soma2l);
             Quarto_Lance(i,J,Soma2l,Soma3l);  --Ply 4/5: opponent's reply, then the computer's answer to it.
 
+
+
             if not Time_Management.Search_Aborted
               and then N = L
               and then Temporario4 = 1
               and then BackupPeao = false
+             
             then
                Jogada_PerdeP(I,J):=false;
             end if;
@@ -1244,6 +2996,8 @@ procedure Mate_ele2(I,J:Integer) is
             Analize2(i,J,K,L,Soma2l,Soma1l);
             Terceiro_Lance(i,J,k,L,Temporario4,Soma2l);  --Executa o procedimento Terceiro Lance.
 
+
+
             if not Time_Management.Search_Aborted then
 
             --  O(1) king-presence update: the opponent's trial reply
@@ -1296,8 +3050,6 @@ procedure Mate_ele2(I,J:Integer) is
  --Qualquer pe�a pode sair de qualquer lugar e ir para qualquer outro que nao tenha uma pe�a do mesmo
  --tipo. O Rei a principio pode ser comido (por enquanto).
  --Depois a funcao validade diz se a jogada � possivel.
-
- Root_Game_Phase := Compute_Game_Phase;
 
  for A in 1..64 loop
    for B in 1..64 loop       --De inicio nenhuma jogada � boa ou ruim.
@@ -1431,7 +3183,11 @@ procedure Mate_ele2(I,J:Integer) is
              Analize1(i,J,Soma1l,Soma0l);
 
              if Temporario1=20 or Temporario1=999 then
-               Alinha_Dama_Rei;
+               --  0.9.9.17.20 deep-bug fix: the parameterless body bound to
+               --  declarative-part I/J (always 1,1), so every trial wrote
+               --  Alinha(1,1) and the queen/king alignment guard never
+               --  excluded anything. Pass the actual trial squares.
+               Alinha_Dama_Rei (I, J);
              end if;
              --Isso acima executa um procedimento que da uma resposta true or false.
              --So conta se for de modo que 1 bispo inimigo ficando no lugar da dama
@@ -1457,6 +3213,14 @@ procedure Mate_ele2(I,J:Integer) is
       end if;
  end loop;
 
+  Prechess2_Cascade_Only;
+end prechess2;
+
+-------------------------------------------------------------------------------
+--  PRECHESS2 DECISION CASCADE (STAGE 1..4 FALLBACK TIERS)
+-------------------------------------------------------------------------------
+procedure Prechess2_Cascade_Only is
+begin
  cc:=0; dd:=0;
  --Isso e' uma pequena sa�da.
 
@@ -1469,10 +3233,22 @@ procedure Mate_ele2(I,J:Integer) is
  --  once instead of once per rule-block -- no change to which (A,B) pairs
  --  qualify or to the ascending A-then-B scan order that the "last match
  --  wins" logic below depends on.
- for A in 1..64 loop
-    Own_Piece(A) := Tabuleiro(A) > 0;
-    Not_Own(A)   := Tabuleiro(A) <= 0;
- end loop;
+  Root_Move_Count := 0;
+  --  0.9.9.17.20: rebuild the pure-geometry sweep only when the board or its
+  --  color frame changed (see Invalidate_Cascade_Cache). Veto re-asks reuse
+  --  it; only the cheap veto fold below re-runs.
+  if not Valid_Geometry_Ready then
+     for A in 1..64 loop
+        Own_Piece(A) := Tabuleiro(A) > 0;
+        Not_Own(A)   := Tabuleiro(A) <= 0;
+     end loop;
+     for A in 1..64 loop
+        for B in 1..64 loop
+           Valid_Geometry(A,B) := Validade(A,B);
+        end loop;
+     end loop;
+     Valid_Geometry_Ready := True;
+  end if;
  for A in 1..64 loop
     for B in 1..64 loop
        --  Jogada_Vetada folds the root-move exclusions from the
@@ -1480,10 +3256,14 @@ procedure Mate_ele2(I,J:Integer) is
        --  predicate every cascade tier consults, so a vetoed move is
        --  invisible to all rule blocks below without touching any of
        --  them individually.
-       Valid_Cache(A,B) := Validade(A,B) and then not Jogada_Vetada(A,B);
+       Valid_Cache(A,B) := Valid_Geometry(A,B) and then not Jogada_Vetada(A,B);
        if Valid_Cache(A,B) and then Own_Piece(A) and then Not_Own(B) then
-          Root_Move_Count := Root_Move_Count + 1;
-          Root_Moves(Root_Move_Count) := (A => A, B => B);
+          if Root_Move_Count < Root_Moves'Last then
+             Root_Move_Count := Root_Move_Count + 1;
+             Root_Moves(Root_Move_Count) := (A => A, B => B);
+          else
+             Ada.Text_IO.Put_Line ("info string warning: Root_Moves capacity reached");
+          end if;
        end if;
     end loop;
  end loop;
@@ -2625,6 +4405,6 @@ end if;
  --  searches of the same board, or identical analysis requests can choose
  --  different moves after the counter crosses the Perigo_Empate threshold.
 
-end prechess2;  --Fim do programa propriamente dito.
+end Prechess2_Cascade_Only;  --Fim do programa propriamente dito.
 
 end pprechess2;  --Fim do pacote pprechess2.

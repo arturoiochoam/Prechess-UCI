@@ -1,87 +1,117 @@
+-------------------------------------------------------------------------------
+--  PRECHESS UCI - 64-BIT ZOBRIST HASHING IMPLEMENTATION
+--
+--  Module:        BCH_Hash (Body)
+--  Language:      Ada 2022 (ISO/IEC 8652:2023)
+--  Standard:      GNAT Community / FSF GCC (-gnat2022)
+--  Author:        Arthur Matheus (UCI Layer & Hashing Engine)
+--  Date:          2026
+-------------------------------------------------------------------------------
+
 with Pvalidade;
 
 package body BCH_Hash is
 
-   Zobrist_Pieces : array (-20 .. 20, 1 .. 64) of Hash_Key;
-   Zobrist_Side   : Hash_Key;
-   Zobrist_Ep     : array (1 .. 64) of Hash_Key;
+   ----------------------------------------------------------------------------
+   --  ZOBRIST PSEUDO-RANDOM BASIS TABLES
+   ----------------------------------------------------------------------------
+   --  Static lookup arrays allocated in BSS. Populated at elaboration time.
+   ----------------------------------------------------------------------------
+   Zobrist_Pieces   : array (-20 .. 20, 1 .. 64) of Hash_Key;
+   Zobrist_Side     : Hash_Key;
+   Zobrist_Ep       : array (1 .. 64) of Hash_Key;
    Zobrist_Castling : array (0 .. 15) of Hash_Key;
 
-   --  Kings use piece codes +/-999, far outside the -20..20 piece
-   --  array. The original Hash_Piece silently returned 0 for them,
-   --  which meant KING POSITIONS WERE NOT HASHED AT ALL: any two
-   --  positions differing only in king placement collided, and since
-   --  this hash's one consumer is the threefold-repetition history,
-   --  the engine would declare "draw by repetition" after kings merely
-   --  maneuvered through distinct squares (reproduced in a won K+R vs
-   --  K endgame: six distinct positions, instant false draw claim).
+   --  Dedicated tables for King pieces (+/- 999).
+   --  CRITICAL ARCHITECTURAL FIX:
+   --  Legacy engine uses piece codes +/-999 for Kings, which lie far outside
+   --  the standard -20..20 piece array bounds. Dedicated tables prevent
+   --  silent return of 0, ensuring distinct king placements hash to distinct keys
+   --  and preventing false threefold repetition claims during endgame maneuvers.
    Zobrist_White_King : array (1 .. 64) of Hash_Key;
    Zobrist_Black_King : array (1 .. 64) of Hash_Key;
    
    Is_Initialized : Boolean := False;
    
+   ----------------------------------------------------------------------------
+   --  SPLITMIX64 PSEUDO-RANDOM NUMBER GENERATOR
+   ----------------------------------------------------------------------------
+   --  Algorithm: Guy L. Steele Jr., Doug Lea, Christine H. Flood (2014)
+   --  "Fast splittable pseudorandom number generators" (OOPSLA '14)
+   --
+   --  RECURRENCE RELATION:
+   --    S_{k+1} = S_k + \gamma  where \gamma = \text{0x9E3779B97F4A7C15} (\text{Golden Ratio fractional})
+   --    Z = S_{k+1}
+   --    Z = (Z \oplus (Z \gg 30)) \times \text{0xBF58476D1CE4E5B9}
+   --    Z = (Z \oplus (Z \gg 27)) \times \text{0x94D049BB133111EB}
+   --    Result = Z \oplus (Z \gg 31)
+   --
+   --  STATISTICAL VALIDATION: Passes TestU01 BigCrush, Dieharder, and PractRand.
+   ----------------------------------------------------------------------------
    procedure Init_Zobrist is
-      Seed : Hash_Key := 16253412351234123;
+      State : Hash_Key := 16253412351234123;
+
       function Next_Random return Hash_Key is
+         Z : Hash_Key;
       begin
-         Seed := Seed xor (Seed * 2**13);
-         Seed := Seed xor (Seed / 2**7);
-         Seed := Seed xor (Seed * 2**17);
-         return Seed;
+         State := State + 16#9E3779B97F4A7C15#;
+         Z := State;
+         Z := (Z xor (Z / 2**30)) * 16#BF58476D1CE4E5B9#;
+         Z := (Z xor (Z / 2**27)) * 16#94D049BB133111EB#;
+         return Z xor (Z / 2**31);
       end Next_Random;
    begin
-      if Is_Initialized then return; end if;
+      if Is_Initialized then
+         return;
+      end if;
       
+      -- Initialize piece-square tables
       for P in -20 .. 20 loop
          for S in 1 .. 64 loop
-            Zobrist_Pieces(P, S) := Next_Random;
+            Zobrist_Pieces (P, S) := Next_Random;
          end loop;
       end loop;
       
+      -- Initialize side-to-move key
       Zobrist_Side := Next_Random;
       
+      -- Initialize en-passant square keys
       for S in 1 .. 64 loop
-         Zobrist_Ep(S) := Next_Random;
+         Zobrist_Ep (S) := Next_Random;
       end loop;
       
+      -- Initialize castling rights keys (4-bit domain [0 .. 15])
       for C in 0 .. 15 loop
-         Zobrist_Castling(C) := Next_Random;
+         Zobrist_Castling (C) := Next_Random;
       end loop;
 
+      -- Initialize dedicated King square keys
       for S in 1 .. 64 loop
-         Zobrist_White_King(S) := Next_Random;
-      end loop;
-      for S in 1 .. 64 loop
-         Zobrist_Black_King(S) := Next_Random;
+         Zobrist_White_King (S) := Next_Random;
+         Zobrist_Black_King (S) := Next_Random;
       end loop;
 
       Is_Initialized := True;
    end Init_Zobrist;
 
-   function Hash_Piece(Piece : Integer; Square : Integer) return Hash_Key is
+   ----------------------------------------------------------------------------
+   --  LEAF KEY RETRIEVAL
+   ----------------------------------------------------------------------------
+   function Hash_Piece (Piece : Integer; Square : Integer) return Hash_Key is
    begin
-      --  Piece = 0 (empty square) must contribute nothing to the hash.
-      --  Compute_Hash skips empties, but this leaf is a public entry
-      --  point and Zobrist_Pieces (0, Square) is a real random key
-      --  (the init loop covers -20..20 inclusive), so an incremental or
-      --  direct caller would otherwise XOR a phantom value into the key
-      --  and corrupt repetition detection.
+      --  Empty squares (Piece = 0) contribute identity (0) under XOR.
       if Piece = 0 then
          return 0;
       elsif Piece = 999 then
-         return Zobrist_White_King(Square);
+         return Zobrist_White_King (Square);
       elsif Piece = -999 then
-         return Zobrist_Black_King(Square);
+         return Zobrist_Black_King (Square);
       elsif Piece < -20 or Piece > 20 then
-         --  Unreachable for the engine's piece codebook
-         --  ({-20,-7,-4,-3,-1,0,1,3,4,7,20,999,-999}); the +/-999 kings
-         --  are handled just above. Raise rather than silently returning 0
-         --  (which would corrupt repetition detection), so any future
-         --  piece-code drift surfaces immediately. NB: a raise statement is
-         --  NOT a runtime check, so -gnatp does not suppress it.
+         --  Enforce piece codebook validity ({-20,-7,-4,-3,-1,0,1,3,4,7,20,999,-999}).
+         --  Explicit raise surfaces illegal memory state immediately.
          raise Program_Error;
       end if;
-      return Zobrist_Pieces(Piece, Square);
+      return Zobrist_Pieces (Piece, Square);
    end Hash_Piece;
    
    function Hash_Side return Hash_Key is
@@ -89,43 +119,50 @@ package body BCH_Hash is
       return Zobrist_Side;
    end Hash_Side;
    
-   function Hash_Ep(Square : Integer) return Hash_Key is
+   function Hash_Ep (Square : Integer) return Hash_Key is
    begin
-      if Square = 0 then return 0; end if;
-      return Zobrist_Ep(Square);
+      if Square = 0 then
+         return 0;
+      end if;
+      return Zobrist_Ep (Square);
    end Hash_Ep;
    
-   function Hash_Castling(Rights : Integer) return Hash_Key is
+   function Hash_Castling (Rights : Integer) return Hash_Key is
    begin
-      return Zobrist_Castling(Rights mod 16);
+      return Zobrist_Castling (Rights mod 16);
    end Hash_Castling;
    
-   function Compute_Hash(White_To_Move : Boolean; Ep_Square : Integer; Castling_Rights : Integer) return Hash_Key is
+   ----------------------------------------------------------------------------
+   --  FULL POSITION RECOMPUTATION
+   ----------------------------------------------------------------------------
+   function Compute_Hash
+     (White_To_Move   : Boolean;
+      Ep_Square       : Integer;
+      Castling_Rights : Integer) return Hash_Key
+   is
       H : Hash_Key := 0;
    begin
-      if not Is_Initialized then Init_Zobrist; end if;
+      if not Is_Initialized then
+         Init_Zobrist;
+      end if;
       
+      --  Iterate over 64-square 1D mailbox board
       for I in Pvalidade.tabuleiro'Range loop
-         --  Hoist the global array read once per iteration. The square
-         --  index is simply I: tabuleiro is 1..64, so I - 'First + 1 = I.
          declare
-            Piece : constant Integer := Pvalidade.tabuleiro(I);
+            Piece : constant Integer := Pvalidade.tabuleiro (I);
          begin
             if Piece /= 0 then
-               H := H xor Hash_Piece(Piece, I);
+               H := H xor Hash_Piece (Piece, I);
             end if;
          end;
       end loop;
       
+      --  XOR side to move
       if White_To_Move then
          H := H xor Hash_Side;
       end if;
 
-      --  Route EP/castling through the public helpers so Compute_Hash
-      --  shares their input contract instead of indexing the private
-      --  Zobrist arrays directly. Concretely: Hash_Castling reduces
-      --  Rights mod 16, so an out-of-range Castling_Rights no longer
-      --  raises Constraint_Error here; Hash_Ep guards Square = 0.
+      --  XOR en-passant and castling rights
       H := H xor Hash_Ep (Ep_Square);
       H := H xor Hash_Castling (Castling_Rights);
       
@@ -133,11 +170,6 @@ package body BCH_Hash is
    end Compute_Hash;
 
 begin
-   --  Populate the Zobrist tables at elaboration so every public entry
-   --  point -- including the leaf Hash_Piece/Hash_Side/Hash_Ep/
-   --  Hash_Castling readers, not just Compute_Hash -- observes
-   --  initialized data. Without this, a caller that hit a leaf before
-   --  the first Compute_Hash would read the all-zero default and every
-   --  position would collapse to the same key.
+   --  Ensure tables are populated at package elaboration time.
    Init_Zobrist;
 end BCH_Hash;

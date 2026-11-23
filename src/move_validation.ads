@@ -1,43 +1,72 @@
---  Move_Validation tracks the UCI-visible game state that the legacy
---  Pvalidade/Pprechess2 engine core has no concept of at all: castling
---  rights, the en-passant target square, and the derived legality rules
---  (attacked-square detection, check detection, castling legality) that
---  both castling and en-passant require. None of this existed anywhere
---  in the 0.7.8 codebase (Pvalidade.Validade explicitly never allows
---  en-passant to occur, and never considers castling), so this is new,
---  self-contained functionality layered cleanly on top of the legacy
---  board representation (Pvalidade.Tabuleiro) rather than a patch
---  scattered through the legacy search.
+-------------------------------------------------------------------------------
+--  PRECHESS UCI - FIDE RULES & DERIVED LEGALITY ENGINE
+--
+--  Module:        Move_Validation
+--  Language:      Ada 2022 (ISO/IEC 8652:2023)
+--  Standard:      GNAT Community / FSF GCC (-gnat2022)
+--  Author:        Arthur Matheus (FIDE Rules & Legality Layer)
+--  Date:          2026
+--
+--  ARCHITECTURAL OVERVIEW:
+--  `Move_Validation` encapsulates all FIDE game-state attributes that the legacy
+--  2001 engine (`Pvalidade` / `Pprechess2`) lacked:
+--  1. Castling Rights State Tracking (`White_Castling_K/Q`, `Black_Castling_K/Q`).
+--  2. En-Passant Target Square Tracking (`En_Passant_Sq`).
+--  3. Attacked-Square Detection & In-Check Derivation (`Is_Square_Attacked`, `Is_In_Check`).
+--  4. Full FIDE Castling Legality Verification (`Is_Castle_Legal`, Article 3.8.2).
+--  5. 2D <-> 1D Coordinate Mappings & Board Geometry Transformations.
+--
+--  BOARD GEOMETRY & COORDINATE MAPPINGS:
+--  - 1D Mailbox Index: `Sq \in [1 .. 64]`
+--  - Rank Mapping:     `Rank(Sq) = \lfloor (Sq - 1) / 8 \rfloor + 1 \in [1 .. 8]`
+--  - File Mapping:     `File(Sq) = ((Sq - 1) \pmod 8) + 1 \in [1 .. 8]`
+--  - Square Mapping:   `Sq(Rank, File) = (Rank - 1) \times 8 + File`
+--  - Color Mirroring:  `Mirror(Sq) = Sq(9 - Rank(Sq), File(Sq))`
+--
+--  PERFORMANCE & CONTRACTS:
+--  - Inlined Leaf Mappings: `Rank_Of`, `File_Of`, `Square_Of`, and `Mirror_Square`
+--    are fully inlined (`pragma Inline`) with formal Pre/Post contract aspects.
+--  - Attack Ray Casting: Efficient directional ray traversal terminating on the
+--    first blocking piece.
+-------------------------------------------------------------------------------
+
+with Interfaces; use Interfaces;
+
 package Move_Validation is
+   pragma Elaborate_Body;
 
-   --  (The Move_Validation.Move_Type record that used to live here was
-   --  removed: it duplicated TT_Types.Move_Type verbatim and had zero
-   --  references. All TT/search consumers use TT_Types.Move_Type.)
-
-   --  UCI state tracking for castling and en passant. Reset at the start
-   --  of every game/position and maintained move-by-move by
-   --  Search_Integration.Make_Move_UCI.
+   ----------------------------------------------------------------------------
+   --  FIDE GAME STATE ATTRIBUTES
+   ----------------------------------------------------------------------------
    White_Castling_K : Boolean := True;
    White_Castling_Q : Boolean := True;
    Black_Castling_K : Boolean := True;
    Black_Castling_Q : Boolean := True;
 
-   --  0 means "no en-passant capture available this move", else the
-   --  square a pawn skipped over on its last double-step (the square a
-   --  capturing pawn would land on).
+   --  0 indicates no active en-passant target square; otherwise 1 .. 64.
    En_Passant_Sq : Integer := 0;
 
+   ----------------------------------------------------------------------------
+   --  STATE INITIALIZATION & SYNCHRONIZATION
+   ----------------------------------------------------------------------------
+   --  Resets castling rights to all-true and en-passant to 0.
    procedure Reset_State;
 
+   --  Explicitly sets the 4 castling rights flags (used when parsing FEN).
    procedure Set_Castling_Rights
      (White_K, White_Q, Black_K, Black_Q : Boolean);
 
-   --  Bit 0 = White O-O, bit 1 = White O-O-O, bit 2 = Black O-O,
-   --  bit 3 = Black O-O-O. Feeds BCH_Hash.Compute_Hash so castling
-   --  rights are part of the Zobrist key used for repetition detection.
+   --  Encodes the 4 castling rights into a 4-bit integer [0 .. 15]:
+   --    Bit 0: White Kingside  (O-O)
+   --    Bit 1: White Queenside (O-O-O)
+   --    Bit 2: Black Kingside  (O-O)
+   --    Bit 3: Black Queenside (O-O-O)
    function Castling_Rights_Bits return Integer
      with Post => Castling_Rights_Bits'Result in 0 .. 15;
 
+   ----------------------------------------------------------------------------
+   --  COORDINATE ARITHMETIC & GEOMETRY (INLINED)
+   ----------------------------------------------------------------------------
    function Rank_Of (Sq : Integer) return Integer
      with Pre  => Sq in 1 .. 64,
           Post => Rank_Of'Result in 1 .. 8;
@@ -50,61 +79,80 @@ package Move_Validation is
      with Pre  => Rank in 1 .. 8 and then File in 1 .. 8,
           Post => Square_Of'Result in 1 .. 64;
 
-   --  Re-orients the board for the legacy engine, which only ever
-   --  searches assuming its own pieces are the positive side sitting on
-   --  the low ranks: rank r -> 9 - r, file unchanged. This is a
-   --  reflection (self-inverse) that preserves every piece's legal
-   --  move geometry (ranks, files and diagonals all map onto
-   --  themselves), so it is a valid color-swap for the whole board.
+   --  Re-orients the square across the horizontal axis (Rank r -> 9 - r)
+   --  for the legacy engine's internal perspective.
    function Mirror_Square (Sq : Integer) return Integer
      with Pre  => Sq in 1 .. 64,
           Post => Mirror_Square'Result in 1 .. 64;
 
-   --  True if the square Sq is attacked by the given side, per the
-   --  current contents of Pvalidade.Tabuleiro. Pawns are handled by
-   --  their diagonal attack squares directly (not via Pvalidade.Validade,
-   --  which conflates a pawn's quiet-move and capture geometry based on
-   --  target-square occupancy and therefore cannot answer "is this
-   --  empty square attacked by an enemy pawn").
+   ----------------------------------------------------------------------------
+   --  PRECALCULATED RAY OBSTRUCTION MATRIX (64x64)
+   ----------------------------------------------------------------------------
+   --  Bitmask representation: Bit (Sq - 1) corresponds to Square Sq.
+   --  Ray_Between(Sq1, Sq2) contains the bitmask of squares strictly between
+   --  Sq1 and Sq2 along straight/diagonal rays (or 0 if not collinear).
+   type Ray_Table_Type is array (1 .. 64, 1 .. 64) of Interfaces.Unsigned_64;
+   Ray_Between : Ray_Table_Type;
+
+   procedure Init_Ray_Tables;
+
+   function Square_Bitmask (Sq : Integer) return Interfaces.Unsigned_64
+     with Inline, Pre => Sq in 1 .. 64;
+
+   function Occupied_Bitmask return Interfaces.Unsigned_64
+     with Inline;
+
+   function Is_Ray_Clear (From_Sq, To_Sq : Integer) return Boolean
+     with Inline, Pre => From_Sq in 1 .. 64 and then To_Sq in 1 .. 64;
+
+   ----------------------------------------------------------------------------
+   --  TACTICAL ATTACK & CHECK DETECTION
+   ----------------------------------------------------------------------------
+   --  Evaluates whether target square `Sq` is under attack by any piece of side `By_White`.
+   --  Pawns are evaluated via direct diagonal attack geometries (not via `Pvalidade.Validade`).
    function Is_Square_Attacked (Sq : Integer; By_White : Boolean) return Boolean
      with Pre => Sq in 1 .. 64;
 
-   --  Locates the king (999 or -999) for the given side. Returns 0 only
-   --  if the position has no such king, which should never happen in a
-   --  legal game.
+   --  Locates the King (+999 or -999) for the specified color.
+   --  Returns 0 only if no King exists on the board.
    function Find_King (White_King : Boolean) return Integer
      with Post => Find_King'Result in 0 .. 64;
 
+   --  Returns True iff the specified King is currently in check.
    function Is_In_Check (White_King : Boolean) return Boolean;
 
-   --  Home square of the a- or h-file rook for the given side, used by
-   --  both castling-legality checks and castling-rights maintenance.
+   ----------------------------------------------------------------------------
+   --  FIDE CASTLING MECHANICS (Article 3.8.2)
+   ----------------------------------------------------------------------------
+   --  Returns the initial home square of the rook (a1/h1 for White, a8/h8 for Black).
    function Home_Rook_Square (White : Boolean; Kingside : Boolean) return Integer
      with Post => Home_Rook_Square'Result in 1 .. 64;
 
-   --  Full FIDE castling legality for the side to move: rights intact,
-   --  the rook still on its home square, the squares between king and
-   --  rook empty, and the king neither in check, nor passing through,
-   --  nor landing on an attacked square.
+   --  Verifies complete FIDE castling legality:
+   --  1. Castling right bit must be active.
+   --  2. King and Rook must reside on their exact home squares.
+   --  3. All intermediate squares between King and Rook must be empty.
+   --  4. King must not be in check, nor pass through or land on attacked squares.
    function Is_Castle_Legal (White_To_Move : Boolean; Kingside : Boolean) return Boolean;
 
-   --  Hops the rook to its post-castling square. The king's own hop is
-   --  applied by the caller exactly like any other move.
+   --  Executes the secondary rook jump during castling.
    procedure Apply_Castle_Rook_Move (White_To_Move : Boolean; Kingside : Boolean);
 
-   --  Updates castling rights after a move: clears both rights for a
-   --  side whose king moves, clears the relevant right when a rook
-   --  moves off (or is captured on) its home square.
+   --  Mutates castling rights following a move execution:
+   --  - King move: Clears both rights for that color.
+   --  - Rook move / Rook capture: Clears the corresponding flank right.
    procedure Update_Rights_After_Move
      (From_Sq, To_Sq : Integer; Moved_Piece : Integer);
 
-   --  The square-arithmetic helpers are tiny, side-effect-free, and sit on
-   --  the hottest path (called per node in perft and in the legacy cascade's
-   --  ply loops). Inline them so -gnatn2 can fold them at every call site.
+   --  Pragma Inline directives for hot execution paths.
    pragma Inline (Rank_Of);
    pragma Inline (File_Of);
    pragma Inline (Square_Of);
    pragma Inline (Mirror_Square);
    pragma Inline (Castling_Rights_Bits);
+   --  0.9.9.17.20: attack/check probes run 60-100x per search node.
+   pragma Inline (Is_Square_Attacked);
+   pragma Inline (Find_King);
+   pragma Inline (Is_In_Check);
 
 end Move_Validation;

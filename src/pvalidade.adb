@@ -1,241 +1,275 @@
+-------------------------------------------------------------------------------
+--  PRECHESS UCI - MAILBOX BOARD REPRESENTATION & MOVEMENT ORACLE
+--
+--  Module:        Pvalidade (Body)
+--  Language:      Ada 2022 (ISO/IEC 8652:2023)
+--  Standard:      GNAT Community / FSF GCC (-gnat2022)
+--  Author:        José Lauro Strapasson (Original 2001 Core)
+--                 Arthur Matheus (Ada 2022 Modernization, Telemetry & Bounds Check)
+--  Date:          2001-2026
+-------------------------------------------------------------------------------
+
 with TT_Types;
 
 package body Pvalidade is
 
- function validade(a,b: in integer) return boolean is
+   ----------------------------------------------------------------------------
+   --  CORE MOVEMENT VALIDATION FUNCTION
+   ----------------------------------------------------------------------------
+   function Validade (A, B : in Integer) return Boolean is
+      Resultado : Boolean := False;
+      Ai, Aj    : Integer;
+      Bi, Bj    : Integer;
+      Reta_L1   : Integer;
+      Reta_L2   : Integer;
 
-  --A variavel resultado (do tipo boolean) ja esta declarada no programa.
-  resultado:boolean := False;
-  ai,aj,bi,Bj:Integer;
-  retaL1, retaL2:integer;
-
-  procedure peaoanda is
-  begin
-    if tabuleiro(a)=1 then  --peao do computador.
-       if aj=bj and bi - ai =1 then resultado:=true; else resultado:=false; end if;
-       --Aqui tento programar os dois pulinhos iniciais para o computador.
-       if Aj=Bj and Bi=4 and Ai=2 and Tabuleiro(16 + Aj)=0 then
-          Resultado:=True;
-       end if;
-    else   --peao da pessoa.
-       if aj=bj and ai - bi =1 then resultado:=true; else resultado:=false; end if;
-       --Aqui tento programar os dois pulinhos iniciais para a pessoa.
-       if Aj=Bj and Bi=5 and Ai=7 and Tabuleiro(40 + Aj)=0 then
-          Resultado:=True;
-       end if;
-    end if;
-  end peaoanda;
---Mas por hora nao vou ensinar a comer o peao desse jeito.
---Quando um deles der dois pulos.
-
-  procedure peaocome is
-  begin
-    if tabuleiro(a)=1 then  --peao do computador.
-       if bi - ai =1 and (bj -aj =1 or bj -aj = -1) then resultado:=true; else resultado:=false; end if;
-    else    --peao da pessoa.
-       if ai - bi =1 and (bj -aj =1 or bj -aj = -1) then resultado:=true; else resultado:=false; end if;
-    end if;
-  end peaocome;
-
-  procedure peao  is
-  begin
-   if tabuleiro(b) = 0 then
-    peaoanda ; else
-    peaocome ; end if;
-  end peao;
-
-  procedure bispo  is --Nao uso explicitamente o valor 3 pois o procedimento dama tambem chamara isso.
-    soma, diferenca: integer:=0;  --Atribui zero para o compilador nao reclamar.
-  begin            --Eu vou ter que ver se existe pecas no meio!
-                   --E mais ou menos parecido com o procedimento torre, talvez seja mais claro la.
-                   --Aqui ele vai procurar por pecas intermediarias.
-
-   retaL1:=0;retaL2:=0;
-   soma:=ai + aj;      --Tanto faz usar a ou b.
-   diferenca:=ai - aj; --Se mudasse para aj - ai deveria mudar tambem ai em baixo.
-
-    -- Diagonal onde rank + file e' constante. Varre apenas entre a origem e o destino.
-    if aj < bj then
-       for e in aj + 1 .. bj - 1 loop
-          if soma - e >=1 and soma - e <= 8 then
-             if tabuleiro((soma - e - 1)*8 + e) /= 0 then
-                retaL1:=1;
-             end if;
-          end if;
-       end loop;
-    elsif bj < aj then
-       for e in bj + 1 .. aj - 1 loop
-          if soma - e >=1 and soma - e <= 8 then
-             if tabuleiro((soma - e - 1)*8 + e) /= 0 then
-                retaL1:=1;
-             end if;
-          end if;
-       end loop;
-    end if;
-
-    -- Diagonal onde rank - file e' constante. Varre apenas entre a origem e o destino.
-    if aj < bj then
-       for e in aj + 1 .. bj - 1 loop
-          if diferenca + e >=1 and diferenca + e <= 8 then
-             if tabuleiro((diferenca + e - 1)*8 + e) /=0 then
-                retaL2:=1;
-             end if;
-          end if;
-       end loop;
-    elsif bj < aj then
-       for e in bj + 1 .. aj - 1 loop
-          if diferenca + e >=1 and diferenca + e <= 8 then
-             if tabuleiro((diferenca + e - 1)*8 + e) /=0 then
-                retaL2:=1;
-             end if;
-          end if;
-       end loop;
-    end if;
-
-
-   if (aj + ai = bj + bi and retaL1 = 0) or  (aj - ai = bj - bi and retaL2 = 0) then
-    resultado:=true;
-   else
-    resultado:=false;
-   end if;
-
-  end bispo;
-
-  procedure cavalo  is  --Aqui nao importa de quem e' o cavalo.
-  begin                 --Aqui, como no caso do peao que come, eu teria problemas de parede
-                        --na versao 1..64. Por isso aqui uso sistema de 1..8,1..8.
-
-     if ((bj - aj)**2 = 4 and (bi - ai)**2 = 1) or ((bj - aj)**2 = 1 and (bi - ai)**2 = 4) then
-     --Acima o **2 e' ao quadrado, usei isso para sumir com o sinal mantendo a simetria,
-     --modulo faria o mesmo.
-          resultado:=true;
-     else resultado:=false;
-     end if;
-  end cavalo;
-
-  procedure torre  is  --Nao usar explicitamente o valor 7 pois o procedimento dama tambem chamara isso.
-  retaI,retaJ:integer;
-  begin             --Eu vou ter que ver se existe pecas no meio!
-       --Essa parte vai ver se existe intermediarios.
-       --Direcao I (rank). Varre apenas entre a origem e o destino.
-       retaI:=0; retaJ:=0;
-       if aj < bj then
-          for c in aj + 1 .. bj - 1 loop
-             if tabuleiro((ai - 1)*8 + c) /= 0 then
-                retaI:=1;
-             end if;
-          end loop;
-       elsif bj < aj then
-          for c in bj + 1 .. aj - 1 loop
-             if tabuleiro((ai - 1)*8 + c) /= 0 then
-                retaI:=1;
-             end if;
-          end loop;
-       end if;
-       --Direcao J (file). Varre apenas entre a origem e o destino.
-       if ai < bi then
-          for c in ai + 1 .. bi - 1 loop
-             if tabuleiro((c - 1)*8 + aj) /= 0 then
-                retaJ:=1;
-             end if;
-          end loop;
-       elsif bi < ai then
-          for c in bi + 1 .. ai - 1 loop
-             if tabuleiro((c - 1)*8 + aj) /= 0 then
-                retaJ:=1;
-             end if;
-          end loop;
-       end if;
-       --Essa parte de baixo autoriza o jogo se tiverem alinhados e nao houver intermediarios
-       if bj = aj  and retaJ=0 then
-       resultado:=true; else
-            if bi = ai and retaI=0 then
-            resultado:=true; else
-            resultado:=false;
+      -------------------------------------------------------------------------
+      --  PAWN GEOMETRIC MOVES
+      -------------------------------------------------------------------------
+      procedure Peao_Anda is
+      begin
+         if Tabuleiro (A) = 1 then -- White Pawn (+1)
+            -- Single step forward (+1 rank)
+            if Aj = Bj and Bi - Ai = 1 then
+               Resultado := True;
+            else
+               Resultado := False;
             end if;
-       end if;
-  end torre;
+            -- Initial two-square double push from rank 2 (Ai=2 -> Bi=4)
+            if Aj = Bj and Bi = 4 and Ai = 2 and Tabuleiro (16 + Aj) = 0 then
+               Resultado := True;
+            end if;
+         else -- Black Pawn (-1)
+            -- Single step forward (-1 rank)
+            if Aj = Bj and Ai - Bi = 1 then
+               Resultado := True;
+            else
+               Resultado := False;
+            end if;
+            -- Initial two-square double push from rank 7 (Ai=7 -> Bi=5)
+            if Aj = Bj and Bi = 5 and Ai = 7 and Tabuleiro (40 + Aj) = 0 then
+               Resultado := True;
+            end if;
+         end if;
+      end Peao_Anda;
 
-  procedure dama  is  --Esse provavelmente e' o procedimento mais facil
-  begin
-    torre ;
-    if resultado=false then
-    bispo ;
-    end if;
-  end dama;
+      procedure Peao_Come is
+      begin
+         if Tabuleiro (A) = 1 then -- White Pawn (+1) diagonal capture
+            if Bi - Ai = 1 and (Bj - Aj = 1 or Bj - Aj = -1) then
+               Resultado := True;
+            else
+               Resultado := False;
+            end if;
+         else -- Black Pawn (-1) diagonal capture
+            if Ai - Bi = 1 and (Bj - Aj = 1 or Bj - Aj = -1) then
+               Resultado := True;
+            else
+               Resultado := False;
+            end if;
+         end if;
+      end Peao_Come;
 
-  procedure rei  is   --Nao vou me preocupar com a regra de que o Rei nao pode ser exposto a xeque.
-  begin               --ou a que tem de sair do xeque aqui.
-     if ((bj - aj = 0) or (bj -aj)**2 =1) and ((bi - ai = 0) or (bi -ai)**2 =1) then
-     resultado:=true; else
-     resultado:=false;     --Tambem aqui nao me preocupo com Roque.
-     end if;
-  end rei;
+      procedure Peao is
+      begin
+         if Tabuleiro (B) = 0 then
+            Peao_Anda;
+         else
+            Peao_Come;
+         end if;
+      end Peao;
 
-  procedure disposicao   is
-  --O procedimento disposicao serve para mudar do formato 1..64
-  --para o formato 1..8,1..8. Ele muda de tabuleiro(a) ou tabuleiro(b) para Quadro(ai,aj) ou
-  --Quadro(bi,bj), mas tomo cuidado para nao alterar as variaveis a e b!
-  --Claro, tambem muda as variaveis a e b para ai,aj,bi,bj.
-  begin
-  --Eu tenho a e b no formato 1..64 e quero ai,aj,bi,bj no formato 1..8,1..8.
-  ai:= (a + 7 - ((a + 7) mod 8))/8;       --O mod da o resto!
-  bi:= (b +7 - ((b + 7) mod 8))/8;        --Esse coisa tem de ser repetida para cada lance!
-  aj:= a - 8 * (ai - 1);
-  bj:= b - 8 * (bi - 1);
+      -------------------------------------------------------------------------
+      --  BISHOP / DIAGONAL RAY CASTING
+      -------------------------------------------------------------------------
+      procedure Bispo is
+         Soma      : Integer := 0;
+         Diferenca : Integer := 0;
+      begin
+         Reta_L1 := 0;
+         Reta_L2 := 0;
+         Soma := Ai + Aj;
+         Diferenca := Ai - Aj;
 
-  --  The original also rebuilt the whole 8x8 Quadro mirror of Tabuleiro
-  --  here, on EVERY Validade call -- a 64-square copy per node, paid
-  --  tens of millions of times per deep search. Since Quadro was always
-  --  rebuilt from Tabuleiro at call entry, every quadro(r,c) read in
-  --  the piece handlers was exactly tabuleiro((r-1)*8 + c) at that
-  --  moment; the handlers now index Tabuleiro directly and the rebuild
-  --  is gone. Behavior is identical by construction (verified
-  --  byte-for-byte on the bestmove battery with identical node counts);
-  --  only the redundant copy is removed. The Quadro variable itself was
-  --  write-only (zeroed once per search, never read), so it too was
-  --  removed in 0.7.9.3 along with its zeroing loop.
-  end disposicao;
+         -- Diagonal where rank + file is constant (anti-diagonal)
+         if Aj < Bj then
+            for E in Aj + 1 .. Bj - 1 loop
+               if Soma - E >= 1 and Soma - E <= 8 then
+                  if Tabuleiro ((Soma - E - 1) * 8 + E) /= 0 then
+                     Reta_L1 := 1;
+                  end if;
+               end if;
+            end loop;
+         elsif Bj < Aj then
+            for E in Bj + 1 .. Aj - 1 loop
+               if Soma - E >= 1 and Soma - E <= 8 then
+                  if Tabuleiro ((Soma - E - 1) * 8 + E) /= 0 then
+                     Reta_L1 := 1;
+                  end if;
+               end if;
+            end loop;
+         end if;
 
-  begin  --Funcao Validade
+         -- Diagonal where rank - file is constant (main diagonal)
+         if Aj < Bj then
+            for E in Aj + 1 .. Bj - 1 loop
+               if Diferenca + E >= 1 and Diferenca + E <= 8 then
+                  if Tabuleiro ((Diferenca + E - 1) * 8 + E) /= 0 then
+                     Reta_L2 := 1;
+                  end if;
+               end if;
+            end loop;
+         elsif Bj < Aj then
+            for E in Bj + 1 .. Aj - 1 loop
+               if Diferenca + E >= 1 and Diferenca + E <= 8 then
+                  if Tabuleiro ((Diferenca + E - 1) * 8 + E) /= 0 then
+                     Reta_L2 := 1;
+                  end if;
+               end if;
+            end loop;
+         end if;
 
-  -- Reject out-of-range squares before any board indexing.
-  if A < 1 or A > 64 or B < 1 or B > 64 then
-     return False;
-  end if;
+         if (Aj + Ai = Bj + Bi and Reta_L1 = 0)
+           or (Aj - Ai = Bj - Bi and Reta_L2 = 0)
+         then
+            Resultado := True;
+         else
+            Resultado := False;
+         end if;
+      end Bispo;
 
-  -- Short-circuit null move, empty source, and same-colour capture
-  -- before paying for piece-specific geometry.
-  if A = B then
-     return False;
-  end if;
-  if Tabuleiro(A) = 0 then
-     return False;
-  end if;
-  if Tabuleiro(A) * Tabuleiro(B) > 0 then
-     return False;
-  end if;
+      -------------------------------------------------------------------------
+      --  KNIGHT / LEAP ARITHMETIC
+      -------------------------------------------------------------------------
+      procedure Cavalo is
+      begin
+         -- L-shape movement: (dx^2 = 4 and dy^2 = 1) or (dx^2 = 1 and dy^2 = 4)
+         if ((Bj - Aj)**2 = 4 and (Bi - Ai)**2 = 1)
+           or ((Bj - Aj)**2 = 1 and (Bi - Ai)**2 = 4)
+         then
+            Resultado := True;
+         else
+            Resultado := False;
+         end if;
+      end Cavalo;
 
-  TT_Types.Nodes_Searched := TT_Types.Nodes_Searched + 1;
+      -------------------------------------------------------------------------
+      --  ROOK / ORTHOGONAL RAY CASTING
+      -------------------------------------------------------------------------
+      procedure Torre is
+         Reta_I : Integer := 0;
+         Reta_J : Integer := 0;
+      begin
+         -- Direction I: Scan along rank (horizontal)
+         if Aj < Bj then
+            for C in Aj + 1 .. Bj - 1 loop
+               if Tabuleiro ((Ai - 1) * 8 + C) /= 0 then
+                  Reta_I := 1;
+               end if;
+            end loop;
+         elsif Bj < Aj then
+            for C in Bj + 1 .. Aj - 1 loop
+               if Tabuleiro ((Ai - 1) * 8 + C) /= 0 then
+                  Reta_I := 1;
+               end if;
+            end loop;
+         end if;
 
-  --O que e' a funcao validade?
-  --De inicio eu pensava apenas em pegar uma peca de uma das 64 casas e por numa das outras.
-  --O programa faz isso literalemente, mas dai consulta a funcao validade para ver se a jogada e'
-  --permitida ou nao. A funcao validade vai responder com um true ou false.
+         -- Direction J: Scan along file (vertical)
+         if Ai < Bi then
+            for C in Ai + 1 .. Bi - 1 loop
+               if Tabuleiro ((C - 1) * 8 + Aj) /= 0 then
+                  Reta_J := 1;
+               end if;
+            end loop;
+         elsif Bi < Ai then
+            for C in Bi + 1 .. Ai - 1 loop
+               if Tabuleiro ((C - 1) * 8 + Aj) /= 0 then
+                  Reta_J := 1;
+               end if;
+            end loop;
+         end if;
 
-  disposicao;
-  case abs Tabuleiro (A) is
-     when 1   => peao;
-     when 3   => bispo;
-     when 4   => cavalo;
-     when 7   => torre;
-     when 20  => dama;
-     when 999 => rei;
-     when others => resultado := False;
-  end case;
+         if Bj = Aj and Reta_J = 0 then
+            Resultado := True;
+         elsif Bi = Ai and Reta_I = 0 then
+            Resultado := True;
+         else
+            Resultado := False;
+         end if;
+      end Torre;
 
-  return resultado;
+      -------------------------------------------------------------------------
+      --  QUEEN / COMPOSITE SLIDING
+      -------------------------------------------------------------------------
+      procedure Dama is
+      begin
+         Torre;
+         if not Resultado then
+            Bispo;
+         end if;
+      end Dama;
 
- end validade;  --Fim da funcao Validade.
+      -------------------------------------------------------------------------
+      --  KING / 1-SQUARE STEP
+      -------------------------------------------------------------------------
+      procedure Rei is
+      begin
+         if ((Bj - Aj = 0) or (Bj - Aj)**2 = 1)
+           and ((Bi - Ai = 0) or (Bi - Ai)**2 = 1)
+         then
+            Resultado := True;
+         else
+            Resultado := False;
+         end if;
+      end Rei;
+
+      -------------------------------------------------------------------------
+      --  COORDINATE TRANSLATION: 1..64 -> (Rank 1..8, File 1..8)
+      -------------------------------------------------------------------------
+      procedure Disposicao is
+      begin
+         Ai := (A - 1) / 8 + 1;
+         Bi := (B - 1) / 8 + 1;
+         Aj := (A - 1) mod 8 + 1;
+         Bj := (B - 1) mod 8 + 1;
+      end Disposicao;
+
+   begin
+      --  Boundary defense: reject out-of-bounds indices immediately
+      if A < 1 or A > 64 or B < 1 or B > 64 then
+         return False;
+      end if;
+
+      --  Short-circuit null moves, vacant source, and same-colour captures
+      if A = B then
+         return False;
+      end if;
+      if Tabuleiro (A) = 0 then
+         return False;
+      end if;
+      if Tabuleiro (A) * Tabuleiro (B) > 0 then
+         return False;
+      end if;
+
+      --  Increment global atomic search node telemetry counter
+      TT_Types.Nodes_Searched := TT_Types.Nodes_Searched + 1;
+
+      --  Translate 1D coordinates to 2D rank/file coordinates
+      Disposicao;
+
+      --  Dispatch to piece-specific geometry validator
+      case abs Tabuleiro (A) is
+         when 1      => Peao;
+         when 3      => Bispo;
+         when 4      => Cavalo;
+         when 7      => Torre;
+         when 20     => Dama;
+         when 999    => Rei;
+         when others => Resultado := False;
+      end case;
+
+      return Resultado;
+   end Validade;
 
 end Pvalidade;

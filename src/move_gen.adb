@@ -1,3 +1,13 @@
+-------------------------------------------------------------------------------
+--  PRECHESS UCI - LEGAL MOVE GENERATOR & PERFT VERIFICATION ENGINE
+--
+--  Module:        Move_Gen (Body)
+--  Language:      Ada 2022 (ISO/IEC 8652:2023)
+--  Standard:      GNAT Community / FSF GCC (-gnat2022)
+--  Author:        Arthur Matheus (Perft & Legal Move Engine)
+--  Date:          2026
+-------------------------------------------------------------------------------
+
 with Pvalidade;        use Pvalidade;
 with Move_Validation;
 with Ada.Text_IO;
@@ -6,21 +16,30 @@ with Ada.Strings.Fixed;
 
 package body Move_Gen is
 
-   Max_Moves : constant := 256;
+   function Move_To_UCI (M : Move_Rec) return String is
+   begin
+      if M.From not in 1 .. 64 or else M.To not in 1 .. 64 then
+         return "0000";
+      end if;
+      declare
+         F_File : constant Character :=
+           Character'Val (Character'Pos ('a') + Move_Validation.File_Of (M.From) - 1);
+         F_Rank : constant Character :=
+           Character'Val (Character'Pos ('1') + Move_Validation.Rank_Of (M.From) - 1);
+         T_File : constant Character :=
+           Character'Val (Character'Pos ('a') + Move_Validation.File_Of (M.To) - 1);
+         T_Rank : constant Character :=
+           Character'Val (Character'Pos ('1') + Move_Validation.Rank_Of (M.To) - 1);
+         P : constant String :=
+           (case M.Promo is
+               when 20 => "q", when 7 => "r", when 3 => "b", when 4 => "n",
+               when others => "");
+      begin
+         return F_File & F_Rank & T_File & T_Rank & P;
+      end;
+   end Move_To_UCI;
 
-   type Move_Rec is record
-      From  : Integer;
-      To    : Integer;
-      Promo : Integer;   -- 0 = none, else 20(Q)/7(R)/4(N)/3(B) absolute code
-   end record;
-
-   type Move_Array is array (1 .. Max_Moves) of Move_Rec;
-
-   type Move_List is record
-      V : Move_Array;
-      N : Natural := 0;
-   end record;
-
+   ----------------------------------------------------------------------------
    procedure Append (L : in out Move_List; F, T, P : Integer) is
    begin
       if L.N < Max_Moves then
@@ -34,15 +53,18 @@ package body Move_Gen is
        and then ((White and then Piece > 0)
                   or else (not White and then Piece < 0)));
 
-   --  Pseudo-legal generation for the side to move. Validade supplies correct
-   --  geometry for normal/capture moves (pawn push/double/diagonal, knight,
-   --  sliders with blockers, king); it CANNOT see castling, EP, or promotion,
-   --  so those are added here.
+   ----------------------------------------------------------------------------
+   --  PSEUDO-LEGAL MOVE GENERATION
+   ----------------------------------------------------------------------------
+   --  Scans the mailbox board to generate all pseudo-legal moves for `White`.
+   --  Augments standard moves with Castling, En-Passant, and Promotions.
+   ----------------------------------------------------------------------------
    procedure Gen_Pseudo (White : Boolean; L : in out Move_List) is
       use Move_Validation;
-      Piece : Integer;
+      Piece  : Integer;
       K_From : constant Integer := (if White then 5 else 61);
    begin
+      --  1. Standard sliding, stepping, and leaping moves
       for A in 1 .. 64 loop
          Piece := Tabuleiro (A);
          if Own (Piece, White) then
@@ -51,10 +73,11 @@ package body Move_Gen is
                   if abs Piece = 1
                     and then (Rank_Of (B) = 1 or else Rank_Of (B) = 8)
                   then
-                     Append (L, A, B, 20);
-                     Append (L, A, B, 7);
-                     Append (L, A, B, 4);
-                     Append (L, A, B, 3);
+                     -- Generate 4 promotion piece types
+                     Append (L, A, B, 20); -- Queen
+                     Append (L, A, B, 7);  -- Rook
+                     Append (L, A, B, 4);  -- Knight
+                     Append (L, A, B, 3);  -- Bishop
                   else
                      Append (L, A, B, 0);
                   end if;
@@ -63,6 +86,7 @@ package body Move_Gen is
          end if;
       end loop;
 
+      --  2. FIDE Castling (Kingside and Queenside)
       if Is_Castle_Legal (White, Kingside => True) then
          Append (L, K_From, (if White then 7 else 63), 0);
       end if;
@@ -70,11 +94,12 @@ package body Move_Gen is
          Append (L, K_From, (if White then 3 else 59), 0);
       end if;
 
-      --  En passant: a diagonal pawn capture to an empty square.
+      --  3. En-Passant Pawn Captures
       declare
          EP  : constant Integer := En_Passant_Sq;
          EPr : Integer := 0;
          EPf : Integer := 0;
+
          procedure Try_EP (Cand : Integer) is
             Rq : constant Integer := (if White then EPr - 1 else EPr + 1);
          begin
@@ -107,8 +132,10 @@ package body Move_Gen is
       end;
    end Gen_Pseudo;
 
-   --  Copy-make state: full board + four castling rights + EP square.
-   type Board_Copy is array (1 .. 64) of Integer;
+   ----------------------------------------------------------------------------
+   --  COPY-MAKE RESTORATION STACK RECORD
+   ----------------------------------------------------------------------------
+   subtype Board_Copy is Pvalidade.Board_Array;
    type Saved is record
       Bd             : Board_Copy;
       WK, WQ, BK, BQ : Boolean;
@@ -118,7 +145,7 @@ package body Move_Gen is
    procedure Save (S : out Saved) is
       use Move_Validation;
    begin
-      for I in 1 .. 64 loop S.Bd (I) := Tabuleiro (I); end loop;
+      S.Bd := Tabuleiro;   --  whole-array (block) copy
       S.WK := White_Castling_K;
       S.WQ := White_Castling_Q;
       S.BK := Black_Castling_K;
@@ -129,7 +156,7 @@ package body Move_Gen is
    procedure Restore (S : Saved) is
       use Move_Validation;
    begin
-      for I in 1 .. 64 loop Tabuleiro (I) := S.Bd (I); end loop;
+      Tabuleiro := S.Bd;   --  whole-array (block) copy
       White_Castling_K := S.WK;
       White_Castling_Q := S.WQ;
       Black_Castling_K := S.BK;
@@ -137,6 +164,9 @@ package body Move_Gen is
       En_Passant_Sq    := S.EP;
    end Restore;
 
+   ----------------------------------------------------------------------------
+   --  MOVE EXECUTION (MAKE)
+   ----------------------------------------------------------------------------
    procedure Make (F, T, Promo : Integer; White : Boolean) is
       use Move_Validation;
       Piece     : constant Integer := Tabuleiro (F);
@@ -144,9 +174,7 @@ package body Move_Gen is
       Sign      : constant Integer := (if White then 1 else -1);
       OldEP     : constant Integer := En_Passant_Sq;
    begin
-      --  En passant capture: own pawn diagonally to the empty EP square.
-      --  The file-diff guard distinguishes it from a straight push to the
-      --  same rank-3/6 square.
+      -- Handle En-Passant capture removal
       if Abs_Piece = 1 and then OldEP /= 0 and then T = OldEP
         and then Tabuleiro (T) = 0
         and then abs (File_Of (T) - File_Of (F)) = 1
@@ -154,6 +182,7 @@ package body Move_Gen is
          Tabuleiro ((if White then T - 8 else T + 8)) := 0;
       end if;
 
+      -- Handle Promotion replacement
       if Abs_Piece = 1 and then Promo /= 0
         and then (Rank_Of (T) = 1 or else Rank_Of (T) = 8)
       then
@@ -163,6 +192,7 @@ package body Move_Gen is
       end if;
       Tabuleiro (F) := 0;
 
+      -- Handle King Castling Rook jump
       if Abs_Piece = 999
         and then abs (File_Of (T) - File_Of (F)) = 2
       then
@@ -171,8 +201,10 @@ package body Move_Gen is
             Kingside      => File_Of (T) > File_Of (F));
       end if;
 
+      -- Update Castling Rights
       Update_Rights_After_Move (F, T, Piece);
 
+      -- Update En-Passant Target Square
       if Abs_Piece = 1 and then abs (T - F) = 16 then
          En_Passant_Sq := (F + T) / 2;
       else
@@ -180,6 +212,36 @@ package body Move_Gen is
       end if;
    end Make;
 
+   procedure Make_Move (F, T, Promo : Integer; White : Boolean) is
+   begin
+      Make (F, T, Promo, White);
+   end Make_Move;
+
+   ----------------------------------------------------------------------------
+   --  LEGAL MOVE GENERATION
+   ----------------------------------------------------------------------------
+   procedure Generate_Legal_Moves
+     (White_To_Move : Boolean;
+      List          : out Move_List)
+   is
+      Pseudo : Move_List;
+      S      : Saved;
+   begin
+      List.N := 0;
+      Gen_Pseudo (White_To_Move, Pseudo);
+      for I in 1 .. Pseudo.N loop
+         Save (S);
+         Make (Pseudo.V (I).From, Pseudo.V (I).To, Pseudo.V (I).Promo, White_To_Move);
+         if not Move_Validation.Is_In_Check (White_To_Move) then
+            Append (List, Pseudo.V (I).From, Pseudo.V (I).To, Pseudo.V (I).Promo);
+         end if;
+         Restore (S);
+      end loop;
+   end Generate_Legal_Moves;
+
+   ----------------------------------------------------------------------------
+   --  RECURSIVE PERFT ENGINE
+   ----------------------------------------------------------------------------
    function Perft (Depth : Natural; White_To_Move : Boolean)
       return Long_Long_Integer
    is
@@ -202,19 +264,11 @@ package body Move_Gen is
       return Total;
    end Perft;
 
+   ----------------------------------------------------------------------------
+   --  UCI STRING CONVERSION & DIVIDE FORMATTER
+   ----------------------------------------------------------------------------
    function Img (N : Long_Long_Integer) return String is
      (Ada.Strings.Fixed.Trim (N'Img, Both));
-
-   function Sq_Name (Sq : Integer) return String is
-     (Character'Val (Character'Pos ('a') + Move_Validation.File_Of (Sq) - 1)
-      & Character'Val (Character'Pos ('0') + Move_Validation.Rank_Of (Sq)));
-
-   function Promo_Letter (P : Integer) return String is
-     (if P = 20 then "q"
-      elsif P = 7 then "r"
-      elsif P = 4 then "n"
-      elsif P = 3 then "b"
-      else "");
 
    procedure Perft_Divide (Depth : Positive; White_To_Move : Boolean) is
       L     : Move_List;
@@ -234,8 +288,7 @@ package body Move_Gen is
             end if;
             Total := Total + Sub;
             Ada.Text_IO.Put_Line
-              (Sq_Name (L.V (I).From) & Sq_Name (L.V (I).To)
-               & Promo_Letter (L.V (I).Promo) & " " & Img (Sub));
+              (Move_To_UCI (L.V (I)) & " " & Img (Sub));
          end if;
          Restore (S);
       end loop;
