@@ -37,7 +37,7 @@ anywhere in the engine.
 
 ## Architecture of 0.7.9, and why legacy search was kept
 
-The project requirement was to modernise Prechess into a UCI engine **without replacing** its original search. This search is Prechess's playing character, and rewriting it would lose that identity and risk broad, unverifiable regressions. So 0.7.9 keeps `pprechess2.adb` (the decision cascade. extended to ~40-tier,  and the 3-ply trial search) as the move-choosing core and adds everything else as clean layers around it:
+The project requirement was to modernise Prechess into a UCI engine **without replacing** its original search. This search is Prechess's playing character, and rewriting it would lose that identity and risk broad, unverifiable regressions. So 0.7.9 keeps `pprechess2.adb` (the decision cascade. extended to ~60-tier,  and the 3-ply trial search) as the move-choosing core and adds everything else as clean layers around it:
 
 - `prechess_uci.adb` — the UCI front end and command loop.
 
@@ -52,6 +52,23 @@ The design rule is that ** an unexpected behaviour sits at the root or as a tie-
 ### Architectural Defect and Project Conclusion
 
 Preserving the legacy search core established an upper boundary for engine performance. The three-ply limitation is incorporated directly into the procedural design of `pprechess2.adb`. Because legacy search does not prune branches with alpha-beta cutoffs, increasing search depth causes exponential node expansion. Successive releases addressed this defect through root-level heuristics, positional tie-breaks, static exchange evaluations, and auxiliary verification passes. Because the legacy three-ply cascade retained primary move authority, deep tactical oversights and material blunders persisted. Patching around a three-ply unpruned search cannot replace an alpha-beta negamax search. For this reason, active development has ended.
+
+## Limitations
+
+Architectural limitation and project conclusion: The primary move selector remains the legacy three-ply cascade (`pprechess2.adb`). The unpruned three-ply structure is a defect that prevents the engine from calculating tactical threats or king-safety hazards past ply 3. Root-level heuristics, tactical vetoes, and auxiliary verifier stages cannot resolve this limitation. No further development will occur on this codebase unless the legacy search is completely replaced by an alpha-beta negamax search.
+
+**Deep-chain over-pessimism (known, inherited from 0.7.8):** the ply-4–60 safety chain (`Jogada_Perde_Profunda`) is set whenever the opponent wins material on some computer ply-3 line, ignoring that the computer would simply avoid that ply-3. In open positions this flags almost every move as a deep loss, so the cascade often resolves in its lower (non-tie-break) tiers, and the PST tie-break cannot reach those moves. A correct fix is a minimax rework of the chain; it was implemented and benchmarked for 0.7.9.1 but regressed other positions, so it is deferred.
+
+**No positional evaluation:** the engine scores by material plus the tactical chain, with the piece-square-table tie-break (0.7.9.1) as its only positional input. Consequences, all measured rather than assumed:
+
+- **Opening choices are theory-neutral.** Among equally safe, non-tactical moves, it is not justified to prefer book theory; the tie-break biases toward central development but cannot override a higher-priority cascade tier (a pin or check) or sacrifice material for activity. These moves do not lose material — they are just not always "book."
+
+- **Slow entrapment is only partly covered.** The bishop/knight tables discourage fleeing to a rim or back-rank square, but a squeeze developing over three or more quiet opponent moves, or trapping a rook/queen, is still invisible.
+- **Deferred tactics are not covered.** A material-winning fork/skewer that needs a quiet or long preparatory sequence is missed.
+- **Forced-mate veto is narrow by design:** only mates that start with a check, within two of the engine's own moves.
+- **Non-standard, structurally fixed piece values** (P1 B3 N4 R7 Q20): the board encoding uses a piece's value as its identity, so for 'Validade', the material sum, and ~40 cascade comparisons all depend on these exact numbers. Moving to the modern ≈1/3/3/5/9 scale (where B=N) would require decoupling identity from value across the whole core — a rewrite, not a tweak — so the values are left as-is. The ordering P<B<N<R<Q<K, which the logic relies on, is correct.evaluations, and auxiliary verification passes. 
+
+
 
 ## Changelog
 
