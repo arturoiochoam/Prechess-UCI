@@ -1,14 +1,10 @@
-# Prechess UCI 0.7.9.9
+# Prechess UCI 0.9.9.17.34
 
-Prechess is an Ada chess engine originally written around 2001–2002 as a
-graphical Windows program (`prechess.adb` + `adagraph2000.dll`). Version
-0.7.9 wraps the original engine in a standard text-based **UCI** front end
-(`prechess_uci.adb`) that any UCI GUI can drive, while deliberately
-preserving the legacy fixed-priority move-ordering and evaluation cascade in
-`pprechess2.adb`. Every release since 0.7.8 has added correctness fixes or
-root-level heuristics *around* that legacy cascade, never rewritten it. See
-the changelog below for what changed release by release, and the Architecture
-section for how the legacy core and the newer layers fit together.
+Prechess is a chess engine written in Ada. Originally developed around 2001–2002 as a graphical Windows application (`prechess.adb` with `adagraph2000.dll`), it relied on a custom three-ply heuristic search cascade ('prechess2.adb'). In version 0.7.9, the program was converted into a standard text-based Universal Chess Interface (UCI) engine (`prechess_uci.adb`) compatible with all chess GUIs, adding side-to-move orientation handling so the engine plays both White and Black pieces.
+
+Development from version 0.7.9 through version 0.9.9.17.34 added complete FIDE rule validation, a legal move generator with perft baselines, draw detection, tournament time controls, and a multi-bucket transposition table. Outer layers added tapered piece-square tables, static exchange evaluation, and an auxiliary alpha-beta verification search (`tactical_search.adb`) breaking positional ties while preserving the original playing character. All modern extensions operate at the root or as post-search verification, leaving the internal legacy cascade intact.
+
+Because the legacy search cascade relies on unpruned nested procedural loops, deep tactical calculation is structurally bound by its three-ply horizon. Technical descriptions of each successive release, including tactical vetoes, protocol adjustments, and test suites, are documented in the changelog section below.
 
 > **Authorship**
 > - **José Lauro Strapasson** — original *Prechess 0.7.8*: the legacy engine
