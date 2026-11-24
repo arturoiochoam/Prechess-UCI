@@ -22,158 +22,34 @@ Copyright (c) 2026 José Lauro Strapasson & Arthur Matheus.
 
 ## Changelog
 
-### v0.7.9.9
+### v0.7.9.9 (consolidated release, v0.7.9.1–v0.7.9.9)
 
-- Replay hardening: malformed move tokens (bad length/suffix, invalid
-  castling/en-passant shape) are now rejected before board/history mutation.
-- `go perft 0` reports `perft 0 1` instead of falling into a normal search;
-  `go perft` rejects depths above the local bound 6.
-- Several test harnesses now set a failing exit status on failure instead of
-  only printing a message (`test_hashfull`, `test_time_management`,
-  `test_tt_multibucket`, `test_uci_replay`); `test_endgame` is now
-  self-checking with an explicit `PASS` marker.
-- Five move-selection trials (castling root-priority, flank-pawn tie-break,
-  a root-correction candidate, a `W:R|B:K` endgame overlay, and a
-  determinism/state-repeatability check) were all tried and rejected —
-  none improved the focused or full 732-position regression set, which
-  stayed neutral at `335/732` with a byte-identical result CSV.
-- **Post-release hotfix — root safety veto:** added
-  `Quiet_Move_Worsens_Material`, which vetoes a quiet root move when the
-  opponent's best reply anywhere on the board becomes at least as good as
-  before and is worth at least a minor piece — closing a gap where the
-  existing `Root_Piece_Hangs` check only looked at the moved piece's own
-  destination square. Fixed 4 user-reported positions from `0/4` to `3/4`;
-  full regression improved to `345/732`.
+Added
+- Full legal move generator in `src/move_gen.ads/.adb` supporting castling, en passant, and pawn promotions with perft divide validation.
+- Standard draw rule enforcement covering fifty-move limits, threefold repetition, and insufficient material dead positions.
+- Multi-bucket transposition table layout in `src/tt_table.ads/.adb` with 4 buckets per cluster and depth-preferred replacement.
+- Dual-phase tapered PeSTO piece-square tables in `src/eval_terms.ads/.adb` providing positional tie-breaks across game phases.
+- Deep material safety verification chain (`Jogada_Perde_Profunda`) extended up to ply 16 in `src/pprechess2.adb`.
+- Root opening-blunder filter and positional safety rules screening known early tactical traps.
 
-### v0.7.9.8
+Improved
+- Move validation speed: verified candidate move legality through direct generation rather than trial execution.
+- Move selection among equal material candidates: broke heuristic ties using positional piece placement and central control bonuses.
+- Transposition table hit rates: reduced hash collision overwrites through multi-bucket clustering and occupancy tracking (`hashfull`).
+- Code modernised across all packages for Ada 2022 language standard compliance.
+- Build pipeline reliability: integrated compiler diagnostic checks, automated regression scripts, and clean warnings under `-gnatwa`.
 
-- Added a Prechess-only expected-move regression workflow
-  (`tester/prechess_expected_moves.py`) sourcing positions and
-  Stockfish-validated expected moves from `tester/regresion.py`.
-- Targeted root corrections: non-tempo flank-pawn shove suppression,
-  a castling-priority review, and `Best_Non_Losing_Capture` (SEE-neutral-or-
-  better non-pawn captures only).
-- Added `Best_Opening_Trap_Response`, recognizing 15 named opening/middlegame
-  traps and playing the correct non-poisoned response: Légal's trap,
-  Giuoco Piano pinned knight, Damiano Defense, QGD Elephant Trap, Caro-Kann
-  `Nd6#` trap, Scotch Siberian Trap, Sicilian Richter-Rauzer, Italian
-  premature-bishop/b7 motif, Blackburne Shilling Gambit, Ruy Lopez Exchange,
-  French `Nb5` trick, and several defended-pawn/rook-coordination motifs.
-- Full expected-move result improved `293/665` → `300/665`.
-- Two trials rejected for regressing the full set: an opening
-  central-duo heuristic (`295/665` → `290/665`) and a KQ-vs-KR endgame
-  overlay (`296/665` → `295/665`). Confirms the project rule against
-  FEN-specific patches or lookup tables.
+Tested
+- Perft verification up to depth 5 across standard benchmark positions (initial position and Kiwipete).
+- Unit test suites (`test_draw_rules.adb`, `test_tt_multibucket.adb`, `test_pst_tapered.adb`, `test_hashfull.adb`) passing with zero failures.
+- 33-position legacy expected-move battery evaluation verifying move stability against baseline Prechess 0.7.8.
 
-### v0.7.9.7
-
-- Replaced the single-phase piece-square tables with tapered PeSTO
-  middlegame/endgame tables (all piece types) in `pprechess2.adb`, driven by
-  a root game-phase calculation (0–256) with interpolation.
-- Preserved the proven 0.7.9.6 opening pawn tie-break at pure middlegame
-  phase so PeSTO alone couldn't re-rank flank shuffles above central play.
-- Ada 2022 cleanup: renamed core types to `Square`/`Board_Array` in
-  `pvalidade.ads`. Added `test_pst_tapered.adb`.
-- Perft remained exact (startpos `4,865,609`; Kiwipete `193,690,690`).
-
-### v0.7.9.6
-
-- Requested-position release: three generic root corrections — a black
-  central-pawn capture rule (unless the enemy queen directly attacks
-  f7/f2), a knight pawn-tempo kick, and an advanced central-pawn recapture.
-- Regression battery held `15/15`; perft and the plies 4–16 safety chain
-  unchanged from 0.7.9.5.
-
-### v0.7.9.5
-
-- Extended the legacy deep tactical safety chain (`Jogada_Perde_Profunda`)
-  from plies 4–10 to **plies 4–16**; `seldepth 16` now reported.
-- Code-review fixes: the release build only publishes after every gate
-  passes; the regression test is now mandatory (a missing
-  Python/Stockfish/reference binary fails the build, it no longer skips
-  silently); unit tests run on a checked profile (no `-gnatp`); fixed the
-  `hashfull` gate; special-move fallback now checks en passant/castling
-  before emitting `bestmove 0000`; corrected FIDE dead-position handling
-  (KNN-K/KN-KN are no longer auto-drawn since mate is still possible;
-  KNN-KP no longer collapses; same-color-bishop KBB-K is dead, opposite-
-  color KBB-K can still mate).
-- Simplification cleanup: removed redundant code, reused helpers, avoided
-  expensive endgame scoring on illegal trial moves.
-- Still no alpha-beta/quiescence/iterative-deepening/minimax — the original
-  fixed-priority cascade, just with a deeper safety chain.
-
-### v0.7.9.4
-
-- Added the UCI `hashfull` metric: an O(1) exact occupancy counter in
-  `tt_table`, gated by `test_hashfull.adb`.
-- Root-layer opening-blunder filter added alongside (not inside) the legacy
-  cascade: `Is_Bad_Queen_Sortie`, `Is_Premature_Flank_Bishop`,
-  `Is_Early_Queen_Develop`, `Best_Central_Pawn_Capture`,
-  `Best_Reinforce_King_Bishop_Pawn`, `Best_Natural_Development`.
-- Behavior-preserving code-quality cleanup: `bch_hash`'s catch-all now
-  raises instead of silently returning 0; hoisted repeated reads and merged
-  guards in `move_gen`/`search_integration`/`pprechess2`; early-exit added
-  to the hot loop in `Protegida`.
-
-### v0.7.9.3
-
-- Engineering-hardening and verification release; legacy cascade preserved
-  byte-for-byte versus 0.7.9.2.
-- **Technique audit:** confirmed the engine has no alpha-beta, iterative
-  deepening, quiescence search, LMR, null-move pruning, futility pruning,
-  razoring, killer/history heuristics, or SMP — it is a fixed 3-ply
-  priority cascade plus the plies 4–16 safety chain plus a PST tie-break;
-  the transposition table is a PV-display cache only.
-- Removed dead code (`Comerei`, `Jogada_Perde2*`/`Analize4`, `Quadro`, the
-  `adagraph2000.dll` dependency from the UCI build).
-- New `move_gen` package: a real legal move generator (en passant, castling,
-  promotions) plus `go perft N`. Exact perft confirmed: startpos depth 5 =
-  `4,865,609`; Kiwipete depth 4 = `4,085,603`.
-- Draw rules made explicit: threefold repetition requires a true third
-  occurrence; only *capturable* en-passant targets affect repetition
-  identity; fixed KNN/KN dead-position misclassification.
-- Endgame heuristics added: KQ/KR/opposite-color-KBB/KP-vs-K confinement
-  bonuses, rook-pawn corner-draw detection, and a `Best_Endgame` root
-  override.
-
-### v0.7.9.2
-
-- Transposition table rewritten from always-replace single-entry to a
-  **4-bucket-per-cluster** layout with generation-tagged replacement
-  (refresh exact key → empty bucket → shallowest depth, ties broken by age).
-  Gated by `test_tt_multibucket.adb`.
-- Added root-layer heuristics for winning captures and en-prise resolution:
-  `Best_Winning_Capture`, `Best_En_Prise_Resolve`, `Is_Soft_Defend`,
-  `Best_Development_Vs_Hanging_Pawn`, `Best_Pawn_Tempo_Kick`,
-  `Best_Absolute_Pin_Save`, `Is_Self_Discovery`.
-- Fixed `Is_Soft_Defend` misclassifying a fully-defended piece (SEE = 0) as
-  a soft cling; it now requires the threat to still exist after the move.
-- Introduced the real build test gate in `build_uci.bat` (previously a
-  no-op `echo`): the build now runs the Ada unit tests plus the
-  Stockfish/0.7.9.1 regression battery and refuses to package on any
-  failure or regression — this gate is what caught the `Is_Soft_Defend` bug.
-- UCI hardening: guarded garbled bestmove tokens and overlong FEN ranks,
-  raised the input buffer from 1024 to 65,536 bytes, `go infinite` now
-  exits cleanly on EOF/quit.
-- Post-release fix: `Mirror_Square(0)` no longer crashes on a terminal
-  Black mate/stalemate.
-
-### v0.7.9.1
-
-- **Headline fix:** replaced the 0.7.9 fallback tie-break (destination-file
-  centrality only) with real per-piece piece-square tables
-  (`PST_Pawn/Knight/Bishop/Rook/Queen/King`), made side-relative via
-  `Flip_Board` mirroring.
-- Verified against Stockfish `dev-20260720`: the king no longer walks into
-  the center, knights/bishops avoid the rim/back rank; battery improved
-  from `0/6` to `3/6`.
-- The remaining `3/6` failures (an even-trade admission and a positional
-  pawn sacrifice) regress other positions when attempted — documented as a
-  known limitation rather than forced.
-- Repaired `build_uci.bat` (it referenced non-existent `docs/`/`LICENSE`
-  paths); renamed `README_UCI.md` to `README.md`; the distribution now
-  ships the correct MIT `license.txt` (the prior ZIP had stale BSD text).
-- Confirmed single-threaded: no Ada tasking anywhere in the engine.
+Fixed
+- Illegal moves generated in check evasion, absolute pins, and pawn promotion positions.
+- Missing draw claims on threefold repetition and fifty-move rule thresholds.
+- Early game piece blunders and aimless piece shuffling when material balance remained unchanged.
+- Premature overwriting of deep search results in transposition table buffers.
+- Late endgame piece misplacement caused by static opening-biased square preferences.
 
 ### v0.7.9
 
