@@ -20,6 +20,39 @@ Because the legacy search cascade relies on unpruned nested procedural loops, de
 Released under the MIT License — see `license.txt` for the full text.
 Copyright (c) 2026 José Lauro Strapasson & Arthur Matheus.
 
+
+## Architecture
+
+### Overview
+
+The legacy 3-ply fixed-priority cascade in `pprechess2.adb` is the engine's
+playing character and has been preserved unchanged in its move-ordering
+logic since 0.7.8. Every later release adds behavior *around* it rather than
+inside it: a UCI protocol front end, real move/game-state tracking the
+legacy core never had (castling rights, en passant, draw rules), and a small
+number of root-level heuristics and safety checks that can override the
+cascade's choice at the root only, never during its own trial search. There
+is no alpha-beta, minimax, quiescence search, or iterative deepening
+anywhere in the engine.
+
+## Architecture of 0.7.9, and why legacy search was kept
+
+The project requirement was to modernise Prechess into a UCI engine **without replacing** its original search. This search is Prechess's playing character, and rewriting it would lose that identity and risk broad, unverifiable regressions. So 0.7.9 keeps `pprechess2.adb` (the decision cascade. extended to ~40-tier,  and the 3-ply trial search) as the move-choosing core and adds everything else as clean layers around it:
+
+- `prechess_uci.adb` — the UCI front end and command loop.
+
+- `move_validation.adb` — castling rights, en-passant state, and the derived legality rules (attacked-square and check detection, castling legality) the legacy core never had.
+
+- `search_integration.adb` — FEN parsing, Zobrist hash and draw-rule logic, `info`/score reporting, and root-level move helpers.
+
+- `time_management.adb`, `tt_table.adb`, `bch_hash.adb` — clock handling, transposition table, Zobrist keys.
+
+The design rule is that ** an unexpected behaviour sits at the root or as a tie-break, never inside the cascade**. Castling and en passant are chosen at the root; the forced-mate veto inspects and, when justified, overrides the legacy choice at the root; the piece-square-table term (0.7.9.1) only breaks ties the cascade has already been left open. Where a change touched the core for performance, it was verified byte-identical against a 20-position best-move battery. This is why the legacy engine's move choices are preserved throughout the improvements do not deliberately, and verifiably, intervene.
+
+### Architectural Defect and Project Conclusion
+
+Preserving the legacy search core established an upper boundary for engine performance. The three-ply limitation is incorporated directly into the procedural design of `pprechess2.adb`. Because legacy search does not prune branches with alpha-beta cutoffs, increasing search depth causes exponential node expansion. Successive releases addressed this defect through root-level heuristics, positional tie-breaks, static exchange evaluations, and auxiliary verification passes. Because the legacy three-ply cascade retained primary move authority, deep tactical oversights and material blunders persisted. Patching around a three-ply unpruned search cannot replace an alpha-beta negamax search. For this reason, active development has ended.
+
 ## Changelog
 
 ### v0.7.9.9 (consolidated release, v0.7.9.1–v0.7.9.9)
@@ -89,19 +122,7 @@ Fixed
   correctly **only as Black**, and time management was broken.
 - No FEN parsing, no draw-rule detection.
 
-## Architecture
 
-### Overview
-
-The legacy 3-ply fixed-priority cascade in `pprechess2.adb` is the engine's
-playing character and has been preserved unchanged in its move-ordering
-logic since 0.7.8. Every later release adds behavior *around* it rather than
-inside it: a UCI protocol front end, real move/game-state tracking the
-legacy core never had (castling rights, en passant, draw rules), and a small
-number of root-level heuristics and safety checks that can override the
-cascade's choice at the root only, never during its own trial search. There
-is no alpha-beta, minimax, quiescence search, or iterative deepening
-anywhere in the engine.
 
 ### FIDE rules
 
